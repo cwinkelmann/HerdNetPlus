@@ -71,7 +71,7 @@ def get_least_occupied_gpu_nvidia_smi() -> int:
 
     except subprocess.CalledProcessError as e:
         logger.error(f"Error running nvidia-smi: {e}")
-        return None
+        return 'cpu'
 
 
 
@@ -206,21 +206,21 @@ def main(cfg: DictConfig) -> None:
 
     # iterate through the dataloader to check if it works
     max_plot = 20
-    for i, (img_tensor, target) in enumerate(train_dataset):
-        if i >= max_plot:
-            break
-
-        heatmap = target[0].squeeze(0)
-        cls_map = target[1]
-
-        fig, axes = plot_heatmaps(img_tensor.squeeze(0), heatmap,
-                                  show_argmax_overlay=False, max_channels=1)
-
-        wandb.log({f'augmented_dataset_examples': wandb.Image(fig)})
-        fig.savefig(os.path.join("/home/cwinkelmann/work/Herdnet/playground/transformed_training_data",
-                                 f'augmented_dataset_examples.png'))
-
-        plt.close(fig)
+    # for i, (img_tensor, target) in enumerate(train_dataset):
+    #     if i >= max_plot:
+    #         break
+    #
+    #     heatmap = target[0].squeeze(0)
+    #     cls_map = target[1]
+    #
+    #     fig, axes = plot_heatmaps(img_tensor.squeeze(0), heatmap,
+    #                               show_argmax_overlay=False, max_channels=1)
+    #
+    #     wandb.log({f'augmented_dataset_examples_{i}': wandb.Image(fig)})
+    #     fig.savefig(os.path.join(
+    #                              f'augmented_dataset_examples_{i}.png'))
+    #
+    #     plt.close(fig)
 
 
 
@@ -369,7 +369,7 @@ def main(cfg: DictConfig) -> None:
 # config_name="config_2025_07_13_hasty_edge_blackout_1024"
 # config_name="config_2025_07_22_weinstein_640"
 # config_name="config_2025_07_27_weinstein_full"
-config_name="config_2025_07_27_iguana_sample"
+config_name="herdnetplus_2025_07_29"
 # config_name="config_2025_07_10_hasty_floreana"
 # config_name="config_2025_07_13_hasty_fernandina_s_edge_blackout_512"
 

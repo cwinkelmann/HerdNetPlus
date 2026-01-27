@@ -58,7 +58,7 @@ def _load_albu_transforms(tr_cfg: dict) -> list:
             transforms.append(A.__dict__[name](**kwargs))
         except KeyError as e:
 
-            from utils import augmentations as ca
+            from animaloc.utils import augmentations as ca
             transforms.append(ca.__dict__.get(name, None)(**kwargs))
 
 

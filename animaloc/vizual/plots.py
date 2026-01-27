@@ -25,6 +25,7 @@ import itertools
 from typing import Optional, Dict
 
 import wandb
+from loguru import logger
 from matplotlib.figure import Figure
 from sentry_sdk.utils import epoch
 from torch import Tensor
@@ -110,7 +111,8 @@ from torchvision.transforms import ToPILImage
 
 class Visualiser:
     def __init__(self, output_path: str):
-        self.output_path = output_path
+        self.output_path = Path(output_path)
+        self.output_path.mkdir(exist_ok=True, parents=True)
 
 class HeatMapVisualizer(Visualiser):
     def __init__(self, output_path):
@@ -149,6 +151,9 @@ class HeatMapVisualizer(Visualiser):
         wandb.log({output_name: wandb.Image(heatmap_fig)})
         heatmap_fig.savefig(Path(self.output_path) / output_name)
         plt.close(heatmap_fig)
+
+        logger.info(f"Heatmap saved to {self.output_path}/{output_name}")
+
         return fig
 
 def visualize_sample(image: Tensor, target: Dict, output: typing.Tuple[Tensor, Tensor],):
