@@ -88,7 +88,7 @@ def _read_training_log(work_dir):
 
 @pytest.mark.slow
 def test_early_stopping_default_patience_does_not_trigger(
-    load_config, training_data, tmp_output_dir
+    load_config, training_data, tmp_output_dir, monkeypatch
 ):
     """Enabling early_stopping with no explicit patience must fall back to a
     sane integer default (10), not the boolean `False`. With only 2 epochs,
@@ -97,6 +97,8 @@ def test_early_stopping_default_patience_does_not_trigger(
     Pre-fix behavior: patience defaults to `False` (== 0), so `wait >= patience`
     is True from the first validation and training stops at epoch 1.
     """
+    Path(tmp_output_dir).mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(tmp_output_dir)
     overrides = _common_overrides(training_data, tmp_output_dir) + [
         "datasets.num_classes=7",
         "++datasets.class_def={1: buffalo, 2: elephant, 3: kob, 4: topi, 5: warthog, 6: waterbuck}",
@@ -116,12 +118,14 @@ def test_early_stopping_default_patience_does_not_trigger(
 
 @pytest.mark.slow
 def test_early_stopping_triggers_when_metric_does_not_improve(
-    load_config, training_data, tmp_output_dir
+    load_config, training_data, tmp_output_dir, monkeypatch
 ):
     """With patience=1 and an unreachable min_delta (F1 is in [0,1]),
     no validation can register as an improvement, so training must stop
     at the first validation epoch.
     """
+    Path(tmp_output_dir).mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(tmp_output_dir)
     overrides = _common_overrides(training_data, tmp_output_dir) + [
         "datasets.num_classes=7",
         "++datasets.class_def={1: buffalo, 2: elephant, 3: kob, 4: topi, 5: warthog, 6: waterbuck}",
