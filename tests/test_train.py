@@ -77,3 +77,63 @@ def test_train_convnext_camouflaged(load_config, training_data, tmp_output_dir):
     cfg = load_config("convnext_camouflaged", overrides=overrides)
     results = main(cfg)
     assert results is not None
+
+
+def _read_training_log(work_dir):
+    """Return concatenated contents of all *_training.log files in work_dir."""
+    logs = list(Path(work_dir).glob("*_training.log"))
+    assert logs, f"No *_training.log found in {work_dir}"
+    return "\n".join(p.read_text() for p in logs)
+
+
+@pytest.mark.slow
+def test_early_stopping_default_patience_does_not_trigger(
+    load_config, training_data, tmp_output_dir
+):
+    """Enabling early_stopping with no explicit patience must fall back to a
+    sane integer default (10), not the boolean `False`. With only 2 epochs,
+    training must run to completion — no early-stop log line should appear.
+
+    Pre-fix behavior: patience defaults to `False` (== 0), so `wait >= patience`
+    is True from the first validation and training stops at epoch 1.
+    """
+    overrides = _common_overrides(training_data, tmp_output_dir) + [
+        "datasets.num_classes=7",
+        "++datasets.class_def={1: buffalo, 2: elephant, 3: kob, 4: topi, 5: warthog, 6: waterbuck}",
+        "losses.CrossEntropyLoss.kwargs.weight=[0.1,1.0,2.0,1.0,6.0,12.0,1.0]",
+        "training_settings.epochs=2",
+        "++training_settings.early_stopping=True",
+        # Deliberately omit patience — exercises the fallback path.
+    ]
+    cfg = load_config("dla34_delplanque", overrides=overrides)
+    work_dir = main(cfg)
+    log_text = _read_training_log(work_dir)
+    assert "Early stopping triggered at epoch" not in log_text, (
+        "Default fallback should prevent early stopping from firing in 2 epochs; "
+        "if this fires, the patience fallback is wrong."
+    )
+
+
+@pytest.mark.slow
+def test_early_stopping_triggers_when_metric_does_not_improve(
+    load_config, training_data, tmp_output_dir
+):
+    """With patience=1 and an unreachable min_delta (F1 is in [0,1]),
+    no validation can register as an improvement, so training must stop
+    at the first validation epoch.
+    """
+    overrides = _common_overrides(training_data, tmp_output_dir) + [
+        "datasets.num_classes=7",
+        "++datasets.class_def={1: buffalo, 2: elephant, 3: kob, 4: topi, 5: warthog, 6: waterbuck}",
+        "losses.CrossEntropyLoss.kwargs.weight=[0.1,1.0,2.0,1.0,6.0,12.0,1.0]",
+        "training_settings.epochs=3",
+        "++training_settings.early_stopping=True",
+        "++training_settings.early_stopping_patience=1",
+        "++training_settings.early_stopping_min_delta=10.0",
+    ]
+    cfg = load_config("dla34_delplanque", overrides=overrides)
+    work_dir = main(cfg)
+    log_text = _read_training_log(work_dir)
+    assert "Early stopping triggered at epoch" in log_text, (
+        "Patience=1 with unreachable min_delta should stop at epoch 1."
+    )
