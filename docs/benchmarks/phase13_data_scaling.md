@@ -179,6 +179,19 @@ In order of cost/value:
 4. **Annotation strategy**: based on this curve, **labelling effort beyond ~600 frames should target hard-negative mining, not bulk additions**. The marginal F1 from another 1,000 generic frames is ~0.005; the marginal F1 from 100 hard negatives (false-positive-dense backgrounds) could plausibly be 10× higher. Phase-11 error analysis already identified the FP modes — that work feeds directly into this.
 5. **The Docker container is production-ready** for remote training. Push `dockerkartok/herdnet:phase13-nfull-latest` is the canonical remote-train image; the offline tarball at `/data/mnt/storage/Docker_registry/` is the air-gapped fallback. Both have been validated to reproduce local results to 0.0002 F1.
 
+## TODO — multi-seed sweep at the knee
+
+Open follow-up, not yet scheduled.
+
+- [ ] **N=38, 3 seeds** (~7 GPU-h). Cheapest. Resolves the single outlier point in the curve (best_epoch=1, precision=0.78). Required before any external write-up.
+- [ ] **N=152, N=304, N=608, 3 seeds each** (~250 GPU-h). The knee of the curve. Adds proper error bars where curve flexes from steep to flat, so we can claim the knee location with statistical force rather than a single trace.
+- [ ] **N=full, 1 extra seed** (~170 GPU-h on docker or ~5 h with `AUG_MULT=1`). Confirms the asymptote isn't a one-seed fluke.
+
+Total: ~430 GPU-h, runnable in parallel via `dockerkartok/herdnet:phase13-nfull-latest` on remote GPUs.
+
+Skipped from the original plan (no longer load-bearing for production decisions):
+- ~~From-scratch anchors at N=304 and N=full~~ — ensembling delivers F1=0.972 vs single-model 0.88; the prior-vs-data decomposition no longer drives architecture choices. Re-prioritise only for a paper.
+
 ## Reproduction
 
 ```bash
