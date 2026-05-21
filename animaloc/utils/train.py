@@ -386,10 +386,10 @@ def main(cfg: DictConfig) -> Tuple[Path, dict]:
         work_dir=work_dir,
         print_freq=cfg.training_settings.print_freq,
         valid_freq=cfg.training_settings.valid_freq,
-        early_stopping=cfg.training_settings.early_stopping if hasattr(cfg.training_settings,
-                                                                       "early_stopping") else False,
-        patience=cfg.training_settings.early_stopping_patience if hasattr(cfg.training_settings,
-                                                                          "early_stopping_patience") else False,
+        early_stopping=getattr(cfg.training_settings, "early_stopping", False),
+        patience=getattr(cfg.training_settings, "early_stopping_patience", 10),
+        min_delta=getattr(cfg.training_settings, "early_stopping_min_delta", 0.0),
+        restore_best_weights=getattr(cfg.training_settings, "early_stopping_restore_best_weights", True),
         ema_decay=ema_decay,
     )
 

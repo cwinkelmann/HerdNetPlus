@@ -25,6 +25,14 @@ auto_lr:
   verbose: True
 warmup_iters: 1500
 
+# Early stopping (in-process, on the evaluator's validate_on metric).
+# Disabled by default. When enabled, training stops if validate_on does not
+# improve by more than min_delta for `patience` consecutive validations.
+early_stopping: False
+early_stopping_patience: 20
+early_stopping_min_delta: 0.0
+early_stopping_restore_best_weights: True
+
 # vizual_fn: "model_vizual"
 vizual_fn: visualize_sample
 visualiser:
