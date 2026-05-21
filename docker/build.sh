@@ -25,7 +25,9 @@ cd "$REPO_DIR"
 TRAIN_N="${TRAIN_N:-152}"
 SEED="${SEED:-42}"
 DATA_SRC="${DATA_SRC:-/home/christian/data/training_data/2026_05_08_data_scaling}"
-IMAGE_TAG="${IMAGE_TAG:-herdnet-phase13-N${TRAIN_N}:latest}"
+# Docker requires lowercase repo names — keep the tag lowercase even
+# though the canonical training-size tag uses "N" inside the codebase.
+IMAGE_TAG="${IMAGE_TAG:-herdnet-phase13-n${TRAIN_N}:latest}"
 
 # Pre-flight: source data + warm-start must exist on the host.
 TRAIN_DIR="${DATA_SRC}/train_N${TRAIN_N}_s${SEED}"
@@ -59,16 +61,31 @@ trap "echo 'cleaning up $STAGE'; rm -rf $STAGE" EXIT
 
 echo "Staging build context at $STAGE ..."
 
-# Code + configs (slim copies of the repo).
+# Code + configs (slim copies of the repo). Use rsync with explicit excludes
+# instead of `cp -r` so we don't accidentally pull in tens of GBs of stale
+# Hydra outputs / wandb caches / pycache that tend to accumulate under
+# tools/ during normal use.
 mkdir -p "$STAGE"
 cp pyproject.toml "$STAGE/"
 [ -f README.md ] && cp README.md "$STAGE/"
 cp -r animaloc "$STAGE/"
 cp -r configs  "$STAGE/"
-cp -r tools    "$STAGE/"
+rsync -a \
+  --exclude='outputs'        \
+  --exclude='wandb'          \
+  --exclude='__pycache__'    \
+  --exclude='*.pyc'          \
+  --exclude='*.log'          \
+  --exclude='*.pth'          \
+  --exclude='detections.csv' \
+  --exclude='metrics_results.csv' \
+  --exclude='plots'          \
+  --exclude='best_model.pth' \
+  --exclude='latest_model.pth' \
+  tools/ "$STAGE/tools/"
 cp run_phase13.sh "$STAGE/"
 
-# Strip __pycache__ / .pytest_cache to keep the image lean.
+# Strip pycache / pytest / notebook caches from the rest just in case.
 find "$STAGE" -type d \( -name "__pycache__" -o -name ".pytest_cache" -o -name ".ipynb_checkpoints" \) \
   -exec rm -rf {} + 2>/dev/null || true
 

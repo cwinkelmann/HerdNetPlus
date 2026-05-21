@@ -35,12 +35,57 @@ TRAIN_N=304 IMAGE_TAG=ifa-phase13:rp1 bash docker/build.sh
 
 The build script stages everything into a temp directory so the `docker build` context doesn't include the entire repo (with its 100+ GB `output/`). It cleans up the tempdir after.
 
+## Push to Docker Hub (`dockerkartok/herdnet`)
+
+Images go to the `dockerkartok/herdnet` repository on Docker Hub, tagged by the training subset size so multiple bundles can coexist.
+
+```bash
+# 1. One-time login (use a personal access token, not your password)
+docker login -u dockerkartok      # paste token when prompted
+
+# 2. Build with the canonical local tag (e.g. herdnet-phase13-nfull:latest)
+TRAIN_N=full bash docker/build.sh
+
+# 3. Re-tag for Docker Hub. Use both a dated tag and `latest` for the most recent.
+DATE=$(date +%Y-%m-%d)
+docker tag herdnet-phase13-nfull:latest dockerkartok/herdnet:phase13-nfull-${DATE}
+docker tag herdnet-phase13-nfull:latest dockerkartok/herdnet:phase13-nfull-latest
+
+# 4. Push both tags
+docker push dockerkartok/herdnet:phase13-nfull-${DATE}
+docker push dockerkartok/herdnet:phase13-nfull-latest
+```
+
+Tag scheme:
+- `phase13-n<N>-<YYYY-MM-DD>` — immutable, dated snapshot. Cite this in experiment notes.
+- `phase13-n<N>-latest` — moving pointer to the newest build for that N.
+
+Push size: ~10 GB compressed for `TRAIN_N=full`. Docker Hub free accounts have unlimited public storage but rate-limited pulls — fine for occasional remote-GPU work.
+
+## Pull and run on a remote host
+
+```bash
+# Pull (uses Docker Hub credentials; `docker login` once if it's a private repo)
+docker pull dockerkartok/herdnet:phase13-nfull-latest
+
+# Run a full training, streaming per-epoch metrics + final model artifact to wandb
+docker run --rm --gpus all --shm-size=8g \
+  -e WANDB_API_KEY=$WANDB_API_KEY \
+  -e WANDB_PROJECT=hn_phase13_data_scaling \
+  -e TRAIN_N=full \
+  -e AUG_MULT=1 \
+  -e BATCH_SIZE=8 \
+  -e NUM_WORKERS=16 \
+  -v $(pwd)/output:/app/output \
+  dockerkartok/herdnet:phase13-nfull-latest
+```
+
 ## Run
 
 Single training, with wandb integration:
 
 ```bash
-docker run --rm --gpus all \
+docker run --rm --gpus all --shm-size=8g \
   -e WANDB_API_KEY=$WANDB_API_KEY \
   -e WANDB_PROJECT=hn_phase13_data_scaling \
   -e TRAIN_N=152 \
@@ -69,6 +114,8 @@ Best model lands at `output/phase13_N152_s42_docker/<date>/<time>/best_model.pth
 | `TRAIN_N` | `152` (build-time default; used for naming only) | Training-set tag; data is already baked in |
 | `SEED` | `42` | Random seed |
 | `AUG_MULT` | unset (config default 75) | Override `augmentation_multiplier`; set to `1` for big-N runs to save compute |
+| `BATCH_SIZE` | unset (config default 4) | Override `training_settings.batch_size`; raise on big-VRAM GPUs (e.g. A100/H100) to speed up training |
+| `NUM_WORKERS` | unset (config default 8) | Override `training_settings.num_workers` (DataLoader workers); raise on many-core hosts, lower if you hit memory pressure |
 | `UPLOAD_MODEL` | `1` | Set `0` to skip the post-training wandb artifact upload |
 | `ARTIFACT_NAME` | `phase13_best_model` | wandb artifact name |
 
@@ -110,6 +157,19 @@ Step by step:
 **Fallback**: if the wandb run ID can't be recovered from the training cache (e.g. training was forced offline), the artifact uploads to a sidecar run named `<run>_model` instead. You'll see two rows in that case — flagged with the `model_artifact_sidecar` tag.
 
 Set `UPLOAD_MODEL=0` to skip the artifact upload (training metrics still stream as normal).
+
+## Troubleshooting
+
+**`RuntimeError: DataLoader worker (pid N) ... unable to write to /dev/shm` / "out of shared memory"**
+
+Docker's default `/dev/shm` is 64 MB, but PyTorch's multi-worker DataLoader uses shared memory to pass tensors from worker processes to the main process. With `NUM_WORKERS>0` and reasonably-sized batches this fills up instantly.
+
+Pick one:
+- `--shm-size=8g` (or higher) — per-container, isolated. Recommended.
+- `--ipc=host` — container shares `/dev/shm` with the host. Effectively unlimited but less isolated.
+- `NUM_WORKERS=0` — single-process loading, no shared memory needed but much slower.
+
+The example commands in this README already include `--shm-size=8g`; if you copy-paste your own command, don't drop it.
 
 ## Caveats
 

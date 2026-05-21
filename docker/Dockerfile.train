@@ -62,6 +62,8 @@ ENV TRAIN_N=152 \
     WANDB_PROJECT=hn_phase13_data_scaling \
     WANDB_FLAG=True \
     AUG_MULT="" \
+    BATCH_SIZE="" \
+    NUM_WORKERS="" \
     UPLOAD_MODEL=1 \
     ARTIFACT_NAME=phase13_best_model
 

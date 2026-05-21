@@ -17,6 +17,10 @@
 #   WANDB_FLAG      : True/False (default True)
 #   AUG_MULT        : optional override for datasets.train.augmentation_multiplier
 #                     (leave empty to use config default of 75)
+#   BATCH_SIZE      : optional override for training_settings.batch_size
+#                     (leave empty to use config default of 4)
+#   NUM_WORKERS     : optional override for training_settings.num_workers
+#                     (leave empty to use config default of 8)
 #   UPLOAD_MODEL    : 1/0 (default 1) — upload best_model.pth to wandb
 #   ARTIFACT_NAME   : wandb artifact name (default phase13_best_model)
 
@@ -33,6 +37,8 @@ echo "  SEED:           ${SEED}"
 echo "  WANDB_PROJECT:  ${WANDB_PROJECT}"
 echo "  WANDB_FLAG:     ${WANDB_FLAG}"
 echo "  AUG_MULT:       ${AUG_MULT:-(config default)}"
+echo "  BATCH_SIZE:     ${BATCH_SIZE:-(config default)}"
+echo "  NUM_WORKERS:    ${NUM_WORKERS:-(config default)}"
 echo "  UPLOAD_MODEL:   ${UPLOAD_MODEL}"
 echo "============================================================"
 
@@ -72,10 +78,16 @@ OUT_DIR="/app/output/${RUN_NAME}/$(date '+%Y-%m-%d')/$(date '+%H-%M-%S')"
 mkdir -p "$OUT_DIR"
 TRAIN_LOG="${OUT_DIR}/training.log"
 
-# Optional AUG_MULT override.
+# Optional AUG_MULT / BATCH_SIZE overrides.
 TRAIN_EXTRA=()
 if [ -n "${AUG_MULT}" ]; then
   TRAIN_EXTRA+=("datasets.train.augmentation_multiplier=${AUG_MULT}")
+fi
+if [ -n "${BATCH_SIZE}" ]; then
+  TRAIN_EXTRA+=("training_settings.batch_size=${BATCH_SIZE}")
+fi
+if [ -n "${NUM_WORKERS}" ]; then
+  TRAIN_EXTRA+=("training_settings.num_workers=${NUM_WORKERS}")
 fi
 
 # ---- Train ----
