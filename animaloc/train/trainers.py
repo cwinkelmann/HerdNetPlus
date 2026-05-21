@@ -847,6 +847,8 @@ class Trainer:
                 )
 
         batches_losses = []
+        nan_skip_count = 0
+        max_consecutive_nan_skips = 50
 
         for images, targets in self.train_logger.log_every(self.train_dataloader, self.print_freq, header):
 
@@ -869,9 +871,20 @@ class Trainer:
             loss_value = losses_reduced.item()
 
             if not math.isfinite(loss_value):
-                logger.info("Loss is {}, stopping training".format(loss_value))
-                logger.info(loss_dict_reduced)
-                sys.exit(1)
+                nan_skip_count += 1
+                logger.warning(
+                    f"Non-finite loss ({loss_value}) at epoch {epoch} "
+                    f"(consecutive #{nan_skip_count}/{max_consecutive_nan_skips}); "
+                    f"skipping batch. loss_dict={loss_dict_reduced}"
+                )
+                if nan_skip_count >= max_consecutive_nan_skips:
+                    logger.error(
+                        f"Aborting: {max_consecutive_nan_skips} consecutive non-finite "
+                        f"losses — model has diverged."
+                    )
+                    sys.exit(1)
+                continue
+            nan_skip_count = 0
 
             self.scaler.scale(self.losses).backward()
 
@@ -1091,6 +1104,8 @@ class P2PNetTrainer(Trainer):
             )
 
         batches_losses = []
+        nan_skip_count = 0
+        max_consecutive_nan_skips = 50
 
         for images, targets in self.train_logger.log_every(self.train_dataloader, self.print_freq, header):
 
@@ -1111,12 +1126,23 @@ class P2PNetTrainer(Trainer):
             batches_losses.append(self.losses.detach())
 
 
-            loss_value = self.losses.detach()
+            loss_value = self.losses.detach().item()
 
             if not math.isfinite(loss_value):
-                logger.info("Loss is {}, stopping training".format(loss_value))
-                logger.info(self.losses.detach())
-                sys.exit(1)
+                nan_skip_count += 1
+                logger.warning(
+                    f"Non-finite loss ({loss_value}) at epoch {epoch} "
+                    f"(consecutive #{nan_skip_count}/{max_consecutive_nan_skips}); "
+                    f"skipping batch. loss_dict={loss_dict}"
+                )
+                if nan_skip_count >= max_consecutive_nan_skips:
+                    logger.error(
+                        f"Aborting: {max_consecutive_nan_skips} consecutive non-finite "
+                        f"losses — model has diverged."
+                    )
+                    sys.exit(1)
+                continue
+            nan_skip_count = 0
 
             self.losses.backward()
 

@@ -48,7 +48,7 @@ Pulled with `python tools/pull_wandb_phase13.py --csv phase13_wandb_results.csv 
 | **full** | **0.882** | **0.862** | **0.848** | 0.919 | **0.68** | 1.46 | 12 | 169.8 | **docker (remote)** | finished |
 | full | 0.883 | 0.855 | 0.838 | 0.932 | 0.64 | 1.37 |  4 |  66.0 | local | failed&nbsp;<sup>†</sup> |
 
-<sup>†</sup> "failed" state but summary metrics are complete. Confirmed from the archived logs: both runs hit `Loss is nan, stopping training` mid-training — the aux `ce_loss` went NaN at epoch 15 step 38341 (N=2432) and epoch 6 step 103841 (local N=full). The `best_model.pth` from the earlier valid `best_epoch` (10 and 4 respectively) had already been written, so wandb summary metrics are intact. The remote Docker N=full run on identical configuration **completed cleanly**, so the NaN looks sporadic at large N, not a config bug.
+<sup>†</sup> "failed" state but summary metrics are complete. Confirmed from the archived logs: both runs hit `Loss is nan, stopping training` mid-training — the aux `ce_loss` went NaN at epoch 15 step 38341 (N=2432) and epoch 6 step 103841 (local N=full). The `best_model.pth` from the earlier valid `best_epoch` (10 and 4 respectively) had already been written, so wandb summary metrics are intact. The remote Docker N=full run on identical configuration **completed cleanly**, so the NaN looks sporadic at large N, not a config bug. *Fix:* `animaloc/train/trainers.py` now **skips the batch on a non-finite loss instead of aborting** (commit follows), aborting only after 50 consecutive NaN batches — preserves the existing diverged-model safety net while letting training survive a single bad mini-batch.
 
 ![Phase-13 scaling curve](assets/plots/phase13_scaling.png)
 
