@@ -48,7 +48,7 @@ Pulled with `python tools/pull_wandb_phase13.py --csv phase13_wandb_results.csv 
 | **full** | **0.882** | **0.862** | **0.848** | 0.919 | **0.68** | 1.46 | 12 | 169.8 | **docker (remote)** | finished |
 | full | 0.883 | 0.855 | 0.838 | 0.932 | 0.64 | 1.37 |  4 |  66.0 | local | failed&nbsp;<sup>†</sup> |
 
-<sup>†</sup> "failed" state but summary metrics are complete. Both runs crashed *after* the best checkpoint had been written — almost certainly during post-training cleanup (artifact upload / final test-set inference). Metrics are valid.
+<sup>†</sup> "failed" state but summary metrics are complete. Confirmed from the archived logs: both runs hit `Loss is nan, stopping training` mid-training — the aux `ce_loss` went NaN at epoch 15 step 38341 (N=2432) and epoch 6 step 103841 (local N=full). The `best_model.pth` from the earlier valid `best_epoch` (10 and 4 respectively) had already been written, so wandb summary metrics are intact. The remote Docker N=full run on identical configuration **completed cleanly**, so the NaN looks sporadic at large N, not a config bug.
 
 ![Phase-13 scaling curve](assets/plots/phase13_scaling.png)
 
@@ -178,6 +178,10 @@ In order of cost/value:
 3. **Skip the from-scratch anchors.** With ensembling delivering F1=0.972 vs single-model 0.88, the Phase-8-prior-vs-from-scratch decomposition is no longer load-bearing for production decisions. Re-prioritise only if writing a paper.
 4. **Annotation strategy**: based on this curve, **labelling effort beyond ~600 frames should target hard-negative mining, not bulk additions**. The marginal F1 from another 1,000 generic frames is ~0.005; the marginal F1 from 100 hard negatives (false-positive-dense backgrounds) could plausibly be 10× higher. Phase-11 error analysis already identified the FP modes — that work feeds directly into this.
 5. **The Docker container is production-ready** for remote training. Push `dockerkartok/herdnet:phase13-nfull-latest` is the canonical remote-train image; the offline tarball at `/data/mnt/storage/Docker_registry/` is the air-gapped fallback. Both have been validated to reproduce local results to 0.0002 F1.
+
+## Archived logs
+
+Training-time loguru file sinks for every local run are archived under [`assets/phase13_logs/`](assets/phase13_logs/) — one gzipped log per N (raw 77 KB → 2.7 MB, compressed 37 KB → 1.5 MB). The remote N=full Docker run lives only in wandb at run id `j855ekjq`. See [`assets/phase13_logs/README.md`](assets/phase13_logs/README.md) for an index and viewing tips (`zcat`, `zgrep`).
 
 ## TODO — multi-seed sweep at the knee
 
