@@ -165,6 +165,58 @@ Train with `validate_on: f2_score` or `f5_score` and a lower `adapt_ts`. The sav
 - `_load_albu_transforms` extended to handle container transforms (`OneOf`, `SomeOf`)
 - Suffix convention (`SomeOf_noise`) allows duplicate container keys in Hydra YAML
 
+## Finding Best Runs
+
+Use `tools/best_runs.py` to rank all training runs by any metric:
+
+```bash
+# Scan all output directories (reads metrics from best_model.pth)
+python tools/best_runs.py                          # all runs, sorted by F1
+python tools/best_runs.py --top 10                 # top 10 only
+python tools/best_runs.py --sort-by f2_score       # rank by F2
+python tools/best_runs.py --sort-by recall         # rank by recall
+python tools/best_runs.py --csv results.csv        # export to CSV
+
+# Parse a log file (for runs without new metric storage in pth)
+python tools/best_runs.py --log /tmp/comparison.log
+python tools/best_runs.py --output-dir ./output/comparison_*  # specific subdirs
+```
+
+### How metrics are stored
+
+**In best_model.pth** (new format, post 2026-04-14):
+- `pth['metrics']` dict with: `f1_score`, `f2_score`, `f5_score`, `recall`, `precision`, `mae`, `me`, `rmse`, `tp`, `fn`, `fp`, `avg_score`, `best_val`
+- `pth['config']` — full Hydra config (model name, dataset, training settings)
+- Older pth files only have `best_val` (= best F1)
+
+**In training logs** (three structured log lines):
+- `[METRICS] - Epoch: [N] f1=... f2=... recall=... precision=... mae=... me=...` — after every validation epoch
+- `[BEST_METRICS] - Epoch: [N] ...` — when a new best model is saved
+- `[SUMMARY] output_dir=... model=... best_f1=... recall=... precision=...` — at end of training
+
+## 9-Model Architecture Comparison (2026-04-09)
+
+Full comparison of all backbone/feature combinations on `fmo03_new_objcrop_augplus`, 30 epochs:
+
+| Rank | Model | F1 | F2 | F5 | Epoch |
+|------|-------|---:|---:|---:|------:|
+| 1 | ConvNeXt plain (no camo features) | 0.9398 | 0.9255 | 0.9180 | 20 |
+| 2 | ConvNeXt (sep. arch) | 0.9382 | 0.9351 | 0.9334 | 18 |
+| 3 | ConvNeXt + Gabor+Edge+MultiRes (V1) | 0.9378 | 0.9315 | 0.9282 | 26 |
+| 4 | ConvNeXt-V2 + Gabor (FCMAE) | 0.9326 | 0.9294 | 0.9278 | 24 |
+| 5 | V2 BiFPN+DeformConv | 0.9326 | — | — | 28 |
+| 6 | V3 P2P+All Tiers | 0.9326 | — | — | 18 |
+| 7 | DLA-34 Timm | 0.9235 | 0.9157 | 0.9116 | 28 |
+| 8 | EfficientViT + Gabor | 0.9150 | 0.8884 | 0.8747 | 14 |
+| 9 | DLA-34 Classic | 0.9112 | 0.8973 | 0.8900 | 22 |
+
+**Key findings:**
+- Gabor/Edge/MultiRes features don't improve F1 — plain ConvNeXt slightly wins
+- ConvNeXt-V2 (FCMAE pretrained) offers no gain over V1
+- BiFPN + DeformConv + P2P add complexity without improving F1
+- EfficientViT underperforms (lower capacity) but uses only 2.8GB VRAM
+- ConvNeXt backbone is +2.5 F1 pts over DLA-34 across all variants
+
 ## Experiment Design Recommendations
 
 1. **Quick comparison:** Run ConvNeXt with ObjCrop + augplus — one run covers architecture + augmentation

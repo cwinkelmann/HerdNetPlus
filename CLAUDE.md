@@ -37,6 +37,8 @@ python tools/train.py --config-path <dir> --config-name <name> key=value  # With
 python tools/infer.py --config-dir <dir> --images <path> --model <path>   # Inference
 python tools/patcher.py <root> <h> <w> <overlap> <dest>                   # Create image patches
 python tools/view.py <root> <gt_csv> [-dets <det_csv>]                    # FiftyOne visualization
+python tools/best_runs.py [--top N] [--sort-by f1_score] [--csv out.csv]  # Rank all training runs
+python tools/best_runs.py --log <logfile>                                 # Parse log file for results
 ```
 
 ## Architecture

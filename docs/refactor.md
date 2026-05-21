@@ -310,3 +310,11 @@ If we were sequencing the TODOs against the produce/decode/score refactor:
 6. **Deployment track** (Tier 3 — pip-package, HTTP API, ssh-sync, RunPod) — group into one focused sprint when partners actually need it.
 7. **Multi-GPU** (Tier 2) — defer until experiments grow to need it.
 8. **Calibrated intervals**, **drift detection**, **HF release** (Tier 4) — pick up opportunistically as partners ask for production-grade artefacts.
+
+
+
+TODO: 
+* Inference should be possible without the config because everything is saved in the pth
+* Some weird things like the LossWrapper should not be necessary for inference
+* Allow secondary inputs like geocoded location, i.e. image gps position, this would help the model to decide based metadata
+* Add more metadata, like a image quality value we calculate based on image metadata and drone flight metadata

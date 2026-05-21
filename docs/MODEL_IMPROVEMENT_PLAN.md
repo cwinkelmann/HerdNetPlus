@@ -2,6 +2,35 @@
 
 **Baseline:** CamouflageHerdNetConvNeXt-Tiny, F1=0.9486, 33M params
 
+## Model Comparison Matrix
+
+The pipeline supports a smooth progression from the classic DLA to fully-enhanced architectures.
+All variants can be smoke-tested via `bash run_micro_all.sh` (2 images, 1 epoch, WandB).
+
+| # | Config | Model | Backbone | Gabor | Edge | BiFPN | Deform | P2P | Notes |
+|---|--------|-------|----------|-------|------|-------|--------|-----|-------|
+| 1 | `fmo03_micro_dla34_classic` | HerdNet | DLA-34 (custom) | - | - | - | - | - | Delplanque original |
+| 2 | `fmo03_micro_dla34` | HerdNetTimmDLA | DLA-34 (timm) | - | - | - | - | - | Modernized DLA |
+| 3 | `fmo03_micro_baseline` | HerdNetConvNeXt | ConvNeXt-Tiny | - | - | - | - | - | Separate plain arch |
+| 4 | `fmo03_micro_convnext_plain` | CamouflageHerdNetConvNeXt | ConvNeXt-Tiny | OFF | OFF | - | - | - | Same arch, features disabled |
+| 5 | `fmo03_micro_v1` | CamouflageHerdNetConvNeXt | ConvNeXt-Tiny | ON | ON | - | - | - | V1: Gabor + Edge + MultiRes |
+| 6 | `fmo03_micro_convnextv2` | CamouflageHerdNetConvNeXt | ConvNeXt-V2 Tiny | ON | ON | - | - | - | FCMAE pretrained backbone |
+| 7 | `fmo03_micro_efficientvit` | CamouflageHerdNetConvNeXt | EfficientViT-B1 | ON | ON | - | - | - | Lightweight ViT backbone |
+| 8 | `fmo03_micro_v2` | CamouflageHerdNetConvNeXtV2 | ConvNeXt-Tiny | ON | ON | ON | ON | - | V2: + BiFPN + DeformConv |
+| 9 | `fmo03_micro_v3` | CamouflageHerdNetConvNeXtV3 | ConvNeXt-V2 Tiny | ON | ON | ON | ON | ON | V3: All tiers combined |
+
+**Backbone swap** is controlled by the `backbone` parameter in `CamouflageHerdNetConvNeXt`:
+- `convnext` (default) — ConvNeXt-Tiny, ImageNet-22k pretrained
+- `convnextv2` — ConvNeXt-V2 Tiny, FCMAE + ImageNet-22k pretrained
+- `efficientvit` — EfficientViT-B1, lightweight CNN-ViT hybrid
+
+**Camouflage features** can be toggled independently:
+- `use_gabor: False` — disable Gabor texture filters
+- `use_edge_enhancement: False` — disable edge enhancement in detection head
+- `use_multi_res: False` — disable multi-resolution processing
+
+This enables fair ablation: compare #4 (plain) vs #5 (camouflage ON) with identical architecture.
+
 ## Tier 1: Quick Wins (hours, no/low risk)
 
 - [x] **1A. Fuse Gabor features into backbone** (~1h)
