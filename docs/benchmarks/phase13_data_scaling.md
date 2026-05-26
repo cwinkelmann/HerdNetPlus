@@ -125,7 +125,31 @@ This is **the one data point in the sweep where single-seed reporting is plausib
 
 There is no monotone relationship between N and best_epoch. The smaller-N runs (19, 38, 76) all peak very early or very late — consistent with high optimisation noise on tiny datasets. The mid-curve and asymptote runs (304 → full) all peak between epochs 6 and 12, which suggests the cosine schedule + warm-start finds its operating point ~1/3 of the way through training and the rest is diminishing-returns overfitting that the validator catches via early-stop on best-F1.
 
-### 7. Phase-13 is well below Phase-8 ensemble — as expected
+### 7. Recall peaks at epoch 1, then collapses while precision keeps climbing
+
+Reading the per-epoch validation lines from the archived logs (and from wandb for N=full, since the local N=full run NaN'd at epoch 6 — full trajectory comes from the docker `j855ekjq` run) reveals a pattern hidden by the best-epoch headline numbers above:
+
+| N | epoch 1 |  | best F1 epoch |  | epoch 30 |  |
+|---|---|---|---|---|---|---|
+|   | recall | precision | recall | precision | recall | precision |
+| 152  | 0.804 | 0.857 | 0.754 (ep 18) | 0.936 | 0.747 | 0.936 |
+| 304  | 0.831 | 0.848 | 0.810 (ep 6)  | 0.904 | 0.729 | 0.967 |
+| 608  | 0.822 | 0.889 | 0.823 (ep 10) | 0.913 | 0.727 | 0.972 |
+| 1216 | 0.854 | 0.878 | 0.825 (ep 8)  | 0.922 | 0.769 | 0.957 |
+| **full** | **0.889** | 0.831 | 0.848 (ep 12) | 0.919 | 0.808 | 0.955 |
+
+For N=full (the asymptote run): recall is **highest at epoch 1 (0.889)**, drops monotonically across training to **0.808 by epoch 30** — an **8.1-point loss** — while precision climbs **+12.4 points** (0.831 → 0.955). F1 stays in a 0.023-wide band (0.859–0.882) the entire run, so the validator's "best F1" pick (epoch 12, recall=0.848) is a rounding-error precision improvement that costs **4.1 recall points** versus epoch 1.
+
+**This is structural, not a training bug.** Three reinforcing mechanisms drive it:
+1. `evaluator.validate_on=f1_score` — checkpoint selection optimises the balanced metric, which doesn't reward recall on its own.
+2. `lmds_kwargs.adapt_ts=0.3` is **fixed** across training, but as the model becomes more confident its logit distribution shifts right — the same threshold mechanically prunes more weak-but-correct detections.
+3. The foreground/background CE weight (`[0.1, 5.0]`) explicitly teaches the model to *suppress* anything that's not clearly an iguana — recall-killing by design.
+
+**Implication for active learning.** If the downstream pipeline is human-in-the-loop annotation review, **the F1-best checkpoint is the wrong choice** — recall is the metric that matters, and *training past epoch 1–2 is actively making the model worse for that use case*. Quickest experiment to verify: evaluate the existing N=full epoch-1 checkpoint at `adapt_ts ∈ {0.15, 0.20, 0.25}` — if recall lands at 0.92+ with precision still ≥0.80, that's an active-learning operating point that costs zero additional training.
+
+Full per-epoch trajectories for N ∈ {152, 304, 608, 1216, full} archived at [`assets/phase13_logs/per_epoch_trajectories.csv`](assets/phase13_logs/per_epoch_trajectories.csv).
+
+### 8. Phase-13 is well below Phase-8 ensemble — as expected
 
 For context:
 
@@ -182,6 +206,15 @@ In order of cost/value:
 ## Archived logs
 
 Training-time loguru file sinks for every local run are archived under [`assets/phase13_logs/`](assets/phase13_logs/) — one gzipped log per N (raw 77 KB → 2.7 MB, compressed 37 KB → 1.5 MB). The remote N=full Docker run lives only in wandb at run id `j855ekjq`. See [`assets/phase13_logs/README.md`](assets/phase13_logs/README.md) for an index and viewing tips (`zcat`, `zgrep`).
+
+## TODO — recall-priority operating point for active learning
+
+Open follow-up driven by §7 (Recall peaks at epoch 1, then collapses).
+
+- [ ] **Sweep `adapt_ts` ∈ {0.10, 0.15, 0.20, 0.25, 0.30} on N=full epoch-1 checkpoint** (~10 min, no retraining). Confirm whether dropping the threshold pushes recall to 0.92+ at usable precision.
+- [ ] **Re-run N=full with `evaluator.validate_on=recall`** (~5 h with `AUG_MULT=1`). Picks the recall-best checkpoint instead of F1-best; should land near epoch 1 unless something changes.
+- [ ] **Try `evaluator.validate_on=f2_score`** as a softer compromise — weights recall 2× precision, still bounded.
+- [ ] **Stop-at-N-epochs experiment**: train N=full for only 2 epochs with `validate_on=recall`. Compare against the epoch-1 checkpoint from the full 30-epoch run to see whether the recall ceiling is reachable by stopping early *during* training vs picking it post-hoc.
 
 ## TODO — multi-seed sweep at the knee
 
