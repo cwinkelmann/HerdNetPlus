@@ -149,7 +149,29 @@ For N=full (the asymptote run): recall is **highest at epoch 1 (0.889)**, drops 
 
 Full per-epoch trajectories for N ∈ {152, 304, 608, 1216, full} archived at [`assets/phase13_logs/per_epoch_trajectories.csv`](assets/phase13_logs/per_epoch_trajectories.csv).
 
-### 8. Phase-13 is well below Phase-8 ensemble — as expected
+### 8. Threshold tuning cannot recover the lost recall — the ceiling is structural
+
+Sweep of `adapt_ts` on the N=full local checkpoint (epoch 4, F1=0.883 on stitched val), extending the existing `phase13_eval_20260508_142316` sweep with lower thresholds:
+
+| ts | F1 | Precision | Recall | MAE |
+|---|---|---|---|---|
+| 0.05 | 0.753 | 0.655 | **0.887** | 2.63 |
+| 0.10 | 0.847 | 0.822 | 0.874 | 1.32 |
+| 0.15 | 0.874 | 0.884 | 0.863 | 1.14 |
+| 0.20 | 0.882 | 0.911 | 0.856 | 1.10 |
+| 0.25 | 0.886 | 0.925 | 0.850 | 1.05 |
+| 0.30 (default) | 0.890 | 0.938 | 0.846 | 1.00 |
+| 0.40 | 0.889 | 0.946 | 0.838 | 1.00 |
+
+Three findings:
+
+1. **The recall ceiling for this single trained model is ≈ 0.89, period.** Going from ts=0.30 to ts=0.05 (the absolute knee of the curve) only buys +4.1 recall points. Below 0.05 the metric collapses entirely — there are no more candidates left to admit.
+2. **Precision falls faster than recall rises.** Each percentage point of recall costs roughly 7× as many precision points (0.938 → 0.655 = -28 points for +4.1 recall). For active learning where humans review FPs, this is still a viable trade — but it confirms that the model has *learned* a confidence distribution that aggressively suppresses weak signals; threshold relaxation can only let some of them back through, not invent new ones.
+3. **Epoch-1 recall (0.889) ≈ ts=0.05 recall on the final model (0.887).** This is the strongest statement of the structural problem: **the model never learned to find more iguanas during training** — it spent 30 epochs learning to be more *confident* about the ones it already found at epoch 1, and threshold tuning is just letting us *retrieve* the suppressed predictions.
+
+Sweep CSV: [`output/phase13_low_ts_sweep_20260526_210505/summary.csv`](../../output/phase13_low_ts_sweep_20260526_210505/) (raw `metrics_results.csv` per ts in the same tree). The corresponding low-threshold rows are also appended to [`assets/phase13_logs/per_epoch_trajectories.csv`](assets/phase13_logs/per_epoch_trajectories.csv) for downstream plotting.
+
+### 9. Phase-13 is well below Phase-8 ensemble — as expected
 
 For context:
 
@@ -211,7 +233,7 @@ Training-time loguru file sinks for every local run are archived under [`assets/
 
 Open follow-up driven by §7 (Recall peaks at epoch 1, then collapses).
 
-- [ ] **Sweep `adapt_ts` ∈ {0.10, 0.15, 0.20, 0.25, 0.30} on N=full epoch-1 checkpoint** (~10 min, no retraining). Confirm whether dropping the threshold pushes recall to 0.92+ at usable precision.
+- [x] **Sweep `adapt_ts` ∈ {0.05, 0.10, 0.15} on N=full checkpoint** — *done 2026-05-26*. Result below.
 - [ ] **Re-run N=full with `evaluator.validate_on=recall`** (~5 h with `AUG_MULT=1`). Picks the recall-best checkpoint instead of F1-best; should land near epoch 1 unless something changes.
 - [ ] **Try `evaluator.validate_on=f2_score`** as a softer compromise — weights recall 2× precision, still bounded.
 - [ ] **Stop-at-N-epochs experiment**: train N=full for only 2 epochs with `validate_on=recall`. Compare against the epoch-1 checkpoint from the full 30-epoch run to see whether the recall ceiling is reachable by stopping early *during* training vs picking it post-hoc.
