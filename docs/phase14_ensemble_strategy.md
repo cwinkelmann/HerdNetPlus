@@ -177,3 +177,45 @@ Concrete next file edits (not done yet):
 - [ ] **Decision gate**: kill criteria from above
 - [ ] Stage D (conditional) — hard-negative mining round
 - [ ] Phase 14 writeup as `docs/benchmarks/phase14_ensemble.md` (mirror Phase 13's structure)
+
+## Phase 15 candidates — parked ideas, contingent on Phase 14 outcomes
+
+Ideas that came up during Phase-14 design or implementation but aren't load-bearing for the current decision. Revisit each only if Phase 14's outcome leaves the corresponding failure mode on the table.
+
+### Multi-scale (zoom) augmentation
+
+**Motivation**: Phase 11 catalogued small-iguana FNs explicitly ("tiny iguana wedged into a rock crevice", edge-truncation cases). Current pipeline only does `ShiftScaleRotate(scale_limit=0.15)` — ±15% scale variation. Real-world scale variation is much wider: juvenile vs adult iguanas, drone altitude differences between flights. A wider scale-augmentation range trains the model to recognise iguanas at 0.5×–1.4× apparent size.
+
+**Proposal**: After `ObjectAwareRandomCrop`, add `RandomScale(scale_limit=(-0.5, 0.4), p=0.5)` to the augplus pipeline. The OAC output is 512×512 and `RandomScale` would resize that to ~256–720 px, then resize back (Albumentations native — no custom code).
+
+**Equivalent variant**: crop a 224×224 region from the OAC output → resize 512 (zoom in); or pad to 768×768 → resize 512 (zoom out). Both equivalent to `RandomScale` mathematically; `RandomScale` is the cleaner abstraction.
+
+**Multi-scale TTA at inference** (cheap, no retraining): run inference at scales {0.7×, 1.0×, 1.4×}, merge detections via NMS. Detection literature suggests +0.01–0.02 F1. Worth trying *before* a retrain.
+
+**Cautions**:
+- Validation drift: training on multi-scale, validating on fixed-scale will make per-epoch val noisier — gate selection on the full-size stitched eval (same lesson as Phase 1).
+- Interaction with OAC: place `RandomScale` **after** OAC, not before, so keypoint-aware sampling still operates on the original full-resolution source frame.
+
+**Activate if**: Phase 14 ensemble residual FNs (Phase 11-style analysis) are dominated by small or out-of-scale iguanas.
+
+**Don't activate if**: residual FNs are dominated by ambiguous shapes / occlusion / lighting — different intervention needed.
+
+### Self-supervised pretraining on unlabelled drone imagery
+
+Already mentioned in Phase 14 "Out of scope". Tier-3 lever. Only worth it if H1/H2/H3 *all* under-perform — i.e. ensembling + recipe + hard-negative mining together can't break ≥ 0.94 F1 on the Phase-13 val.
+
+### Test-time augmentation (flip + multi-scale)
+
+Phase 6 ran flip-TTA and showed +0.01–0.02 F1. Phase 14 doesn't use it. Add it to the Stage B inference if the no-TTA ensemble is in the 0.92–0.94 band — a free 0.01 F1 might cross the H1 threshold without retraining.
+
+### Annotation-budget rebalance toward hard negatives
+
+Phase 13 §1 (logarithmic data scaling) + Phase 14 H3 (hard-negative mining beats bulk frames) jointly suggest: stop bulk-labelling new frames, redirect that effort to FP-prone regions identified by the ensemble. Phase 14 Stage D is a single-round test of this. Phase 15 would be a structured **annotation queue** (top-K uncertain detections per week → human verifies → retrain monthly) rather than ad-hoc rounds.
+
+### Calibration / Platt scaling
+
+If Stage B shows the per-member scores are mis-calibrated (high confidence ≠ high actual precision), a per-arch calibration layer (logistic regression on `score → P(iguana | score)`) cleans this up without retraining. Cheap, useful for downstream active-learning thresholding.
+
+### Refactor TODOs from `docs/refactor.md`
+
+The standing refactor list (config-less inference, drop LossWrapper from inference path, GPS metadata input, image-quality metadata score) is independent of model quality and shouldn't gate Phase 15 — but if any of those land before Phase 15, they may change the implementation surface (e.g. GPS metadata could become a new input modality for a future Phase-15 variant).
