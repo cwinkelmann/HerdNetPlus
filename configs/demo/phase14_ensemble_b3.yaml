@@ -1,0 +1,82 @@
+# Phase 14 — cross-arch ensemble member, B3 (ConvNeXt-T plain, Gabor + Edge).
+#
+# Same F5 recipe as phase14_ensemble_b4.yaml but with the older
+# CamouflageHerdNetConvNeXt architecture — same backbone family,
+# without BiFPN/DeformConv. Two architectures are needed to get the
+# cross-arch disagreement that drives ensemble FP suppression
+# (Phase 8 finding).
+
+defaults:
+  - /losses: herdnet_fmo03
+  - /datasets: data_scaling
+  - /training_settings: evaluator
+  - /model: HerdNetTimmConvNext_Camouflaged
+  - _self_
+
+wandb_flag: True
+seed: 42
+device_name: null
+wandb_project: 'hn_phase14_ensemble'
+wandb_entity: 'karisu'
+wandb_run: 'phase14_b3_default'
+wandb_tags: ['phase14', 'ensemble', 'b3', 'f5_recipe']
+wandb_notes: |
+  Phase 14 ensemble member — B3 (CamouflageHerdNetConvNeXt).
+  Recipe matches phase14_ensemble_b4.yaml — only the architecture differs.
+  Warm-start from best_models/phase8/b3_seed<seed>/best_model.pth.
+
+datasets:
+  num_classes: 2
+  class_def:
+    1: 'iguana'
+  train:
+    augmentation_multiplier: 1
+
+losses:
+  CrossEntropyLoss:
+    kwargs:
+      weight:
+        - ${losses.CrossEntropyLoss.background_class_weight}
+        - 2.0
+
+training_settings:
+  lr: 8.0e-05
+  epochs: 10
+  batch_size: 8
+  num_workers: 16
+  warmup_iters: 500
+  valid_freq: 1
+  print_freq: 20
+  early_stopping: True
+  early_stopping_patience: 3
+  early_stopping_min_delta: 0.005
+  early_stopping_restore_best_weights: True
+  auto_lr:
+    mode: 'max'
+    patience: 4
+    threshold: 1e-4
+    threshold_mode: 'rel'
+    cooldown: 2
+    min_lr: 1e-8
+    verbose: True
+  evaluator:
+    select_mode: 'max'
+    validate_on: 'f5_score'
+    kwargs:
+      lmds_kwargs:
+        adapt_ts: 0.20
+  visualiser:
+    down_ratio: 4
+  debug_visualiser: null
+
+model:
+  load_from: null
+  resume_from: null
+  kwargs:
+    pretrained: True
+    down_ratio: 4
+    backbone_size: tiny
+
+hydra:
+  run:
+    dir: ./output/phase14_b3_default/${now:%Y-%m-%d}/${now:%H-%M-%S}
