@@ -19,6 +19,8 @@ cd "$SCRIPT_DIR"
 
 ARCHS="${ARCHS:-b3 b4}"
 SEEDS="${SEEDS:-7 42 123}"
+BATCH_SIZE="${BATCH_SIZE:-}"
+NUM_WORKERS="${NUM_WORKERS:-}"
 DATA_ROOT="${DATA_ROOT:-/home/christian/data/training_data/2026_05_08_data_scaling}"
 WANDB_PROJECT="${WANDB_PROJECT:-hn_phase14_ensemble}"
 WANDB_FLAG="${WANDB_FLAG:-True}"
@@ -67,8 +69,12 @@ for ARCH in $ARCHS; do
     echo "  out:    $OUT_DIR"
     echo "  log:    $LOG"
 
+    EXTRA=()
+    [ -n "$BATCH_SIZE" ]  && EXTRA+=("training_settings.batch_size=${BATCH_SIZE}")
+    [ -n "$NUM_WORKERS" ] && EXTRA+=("training_settings.num_workers=${NUM_WORKERS}")
+
     python tools/train.py \
-      --config-path configs/demo \
+      --config-path "$SCRIPT_DIR/configs/demo" \
       --config-name "$CONFIG_NAME" \
       "seed=${SEED}" \
       "datasets.train.csv_file=${TRAIN_CSV}" \
@@ -82,6 +88,7 @@ for ARCH in $ARCHS; do
       "wandb_project=${WANDB_PROJECT}" \
       "wandb_run=${RUN_NAME}" \
       "+wandb_tags=[phase14,ensemble,${ARCH},f5_recipe,s${SEED}]" \
+      "${EXTRA[@]}" \
       "hydra.run.dir=${OUT_DIR}" \
       2>&1 | tee "$LOG" \
       || { echo "FAILED: $RUN_NAME (exit $?)"; continue; }
