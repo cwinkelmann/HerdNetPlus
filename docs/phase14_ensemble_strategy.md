@@ -57,12 +57,21 @@ Each is testable, with success criteria.
 | `validate_on` | `recall` (`evaluator.select_mode=max`) |
 | Early stopping | `early_stopping=True`, `early_stopping_patience=3`, `early_stopping_min_delta=0.005` |
 | `adapt_ts` (training-time eval) | 0.20 — lower than current 0.30 to align training-time validation with the intended inference threshold |
-| Augmentation | augplus pipeline, `augmentation_multiplier=1` (Phase-13 Option C) |
+| Augmentation | augplus pipeline, **`augmentation_multiplier=1`** (see note below) |
 | Batch / workers | `BATCH_SIZE=8`, `NUM_WORKERS=16` if remote GPU has the headroom |
 | Wandb | Project `hn_phase14_ensemble`, tag per arch+seed |
 | Wall-clock per run | ~5 h on a single GPU |
 | Total wall-clock | ~30 GPU-h sequential, ~5 h if all 6 run in parallel |
 | Container | `dockerkartok/herdnet:phase13-nfull-latest` (already validated to reproduce local results to ΔF1=0.0002) |
+
+**Note on `augmentation_multiplier=1`** (originally 75). The multiplier was introduced for *small-N* datasets — at N=19 or N=38, seeing each frame only once per epoch gives such a sparse gradient signal that "real" epochs are meaningless. Multiplying by 75 was a way to inflate epoch length so the LR scheduler and validator had enough optimizer steps to do useful work. With Phase 14 running on N=full (6,908 frames), that crutch is no longer needed:
+
+- One real epoch is already 6,908 frames — plenty of optimizer steps for the scheduler.
+- With multiplier=75, each "epoch" was ~518k samples — the per-epoch validation curve became a coarse summary over what was effectively 75 mini-epochs, hiding the actual learning trajectory.
+- Phase 13's recall-collapse-after-epoch-1 finding was only visible because the per-step trajectory was still readable; if we want to *see* training dynamics clearly (and have early stopping fire on the right signal), we want one frame = one sample seen.
+- Wall-clock benefit: training time scales linearly with multiplier; dropping 75→1 cuts a ~14-day asymptotic run to ~5 hours.
+
+The augplus *pipeline* itself (HorizontalFlip, ShiftScaleRotate, RandomBrightnessContrast, etc.) still applies — every sample is still augmented randomly. We're just no longer drawing 75 augmented variants of every frame per epoch.
 
 ### Stage B — ensemble inference + operating-point sweep
 
