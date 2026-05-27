@@ -1,4 +1,4 @@
-# Phase 14 — beyond data scaling: ensemble + recall-priority training
+# Phase 14 — beyond data scaling: ensemble + F5-weighted training
 
 **Status**: draft strategy, 2026-05-26.
 **Branch**: `convnext_extension`.
@@ -34,8 +34,10 @@ Each is testable, with success criteria.
 **H1. Cross-arch multi-seed ensemble closes the single-model gap.**
 *Test*: 3 seeds × {B3 (ConvNeXt-T), B4 (ConvNeXt-V2-T + BiFPN + DeformConv)} = 6 members, mean-prediction ensemble. *Success*: F1 ≥ 0.94 on Phase-13 val (Phase 8 hit 0.972 on a different split — anything in the 0.94+ band confirms ensembling is the dominant lever).
 
-**H2. Recall-priority training recipe expands the recall envelope of every ensemble member.**
-*Test*: Train each ensemble member with `validate_on=recall`, `early_stopping_patience=3`, `CE.weight=[0.1, 2.0]` (foreground 5.0 → 2.0), stop at the recall-best checkpoint. *Success*: per-member recall at default threshold ≥ 0.86 (vs 0.85 today on N=full) AND ensemble recall ≥ 0.95.
+**H2. F5-weighted training recipe expands the recall envelope of every ensemble member without collapsing precision.**
+*Test*: Train each ensemble member with `validate_on=f5_score`, `early_stopping_patience=3`, `CE.weight=[0.1, 2.0]` (foreground 5.0 → 2.0), stop at the F5-best checkpoint. *Success*: per-member recall at default threshold ≥ 0.86 AND per-member precision ≥ 0.85 (vs 0.94 today — explicit trade), AND ensemble recall ≥ 0.95.
+
+*Why F5, not raw recall*: pure recall is degenerate — a model that flags every pixel as iguana scores recall=1.0 at precision≈0. F5 keeps recall as the dominant term (`F5 = (1 + 25) · P · R / (25 · P + R)` — recall weighted 5× over precision) while remaining bounded by *both* metrics, so the optimum is at the operating point that maximises recall *given some precision floor*. F2 is the safer alternative if F5 over-corrects.
 
 **H3. Hard-negative-mined frames buy more than equivalent bulk frames.**
 *Test*: From the Phase-13 ensemble's FPs, manually verify 100 hard-negative regions. Add them as labelled background. Retrain one member, compare member precision at fixed recall to a member trained on +100 bulk frames. *Success*: hard-negative member has ≥0.02 higher precision at recall=0.85 than the bulk-frame member. (This experiment is deferred until H1+H2 are confirmed — no point hard-negative mining the wrong model.)
@@ -54,7 +56,7 @@ Each is testable, with success criteria.
 | Warm-start | Phase-8 production member for that arch (`best_models/phase8/{b3,b4}_seed{7,42,123}/best_model.pth`) |
 | Loss | `losses=herdnet_fmo03` with `CE.kwargs.weight=[0.1, 2.0]` (default override: 5.0 → 2.0) |
 | Epochs | 10 max — Phase 13 §6 shows late epochs only hurt recall |
-| `validate_on` | `recall` (`evaluator.select_mode=max`) |
+| `validate_on` | `f5_score` (`evaluator.select_mode=max`) — bounded recall-priority; see H2 |
 | Early stopping | `early_stopping=True`, `early_stopping_patience=3`, `early_stopping_min_delta=0.005` |
 | `adapt_ts` (training-time eval) | 0.20 — lower than current 0.30 to align training-time validation with the intended inference threshold |
 | Augmentation | augplus pipeline, **`augmentation_multiplier=1`** (see note below) |
@@ -111,7 +113,8 @@ Procedure:
 | Outcome | Action |
 |---|---|
 | Stage A+B reach F1 ≥ 0.95 AND recall ≥ 0.93 | Declare production model, proceed to Stage C+D, archive as Phase 14 |
-| Stage A+B reach F1 ∈ [0.92, 0.95] but recall < 0.93 | Investigate: is the recall-priority recipe pulling individual members too far apart? Try `validate_on=f2_score` instead and rerun A |
+| Stage A+B reach F1 ∈ [0.92, 0.95] but recall < 0.93 | F5 isn't pulling far enough into recall — try `validate_on=recall` with a precision-floor early-stop guard (`stop if precision < 0.75`) and rerun A |
+| Stage A+B reach F1 ∈ [0.92, 0.95] but precision < 0.80 | F5 pulled too far — fall back to `validate_on=f2_score` (recall weighted 2× over precision) and rerun A |
 | Stage A+B fail to clear F1 ≥ 0.92 | **Stop**. Single-model ceiling is real and ensembling didn't help. Re-examine architecture, loss design, or val-set composition before more training |
 | Stage D fails H3 (hard negatives no better than bulk) | Stop annotation effort entirely. Lever is architectural, not data |
 
@@ -128,9 +131,9 @@ Procedure:
 Each of these is a useful learning regardless of outcome:
 
 - **Confirmed**: ensembling on the Phase-13 val pushes F1 to the same 0.97 band as Phase-8 → publish the recipe, freeze production stack
-- **Surprising**: ensembling helps less on this val split than on Phase-8 → val split is harder, OR the recall-priority recipe over-corrects → A/B test the recipe
-- **Confirmed**: recall-priority recipe lifts per-member recall by ≥0.01 → adopt as the default training recipe going forward
-- **Surprising**: recall-priority recipe leaves per-member F1 unchanged from a normal F1-trained member → the issue isn't the training objective, it's the data; reopen hard-negative mining as the primary lever
+- **Surprising**: ensembling helps less on this val split than on Phase-8 → val split is harder, OR the F5 recipe over-corrects → A/B test the recipe
+- **Confirmed**: F5 recipe lifts per-member recall by ≥0.01 → adopt as the default training recipe going forward
+- **Surprising**: F5 recipe leaves per-member F1 unchanged from a normal F1-trained member → the issue isn't the training objective, it's the data; reopen hard-negative mining as the primary lever
 - **Confirmed**: hard-negative mining outperforms bulk frames at fixed cost → re-prioritise annotation budget toward FP regions identified by the ensemble
 - **Surprising**: no improvement from hard negatives → architectural change needed (larger backbone, self-supervised pretraining on unlabelled drone imagery)
 
@@ -158,15 +161,15 @@ done
 ```
 
 Concrete next file edits (not done yet):
-- New `configs/demo/phase14_ensemble_b3.yaml`, `phase14_ensemble_b4.yaml` — clone of `data_scaling_b4.yaml` with `CE.kwargs.weight=[0.1, 2.0]`, `epochs=10`, `evaluator.validate_on=recall`, `early_stopping*` set
+- New `configs/demo/phase14_ensemble_b3.yaml`, `phase14_ensemble_b4.yaml` — clone of `data_scaling_b4.yaml` with `CE.kwargs.weight=[0.1, 2.0]`, `epochs=10`, `evaluator.validate_on=f5_score`, `early_stopping*` set
 - New `run_phase14.sh` — wrapper around 6 trainings (sequential local fallback) + Stage B ensemble inference
 - Extend `tools/ensemble_infer.py` if needed to handle mixed-arch / per-checkpoint config reads (already supports cross-arch per ensemble_infer.py docstring)
 - Stage C error-analysis script: copy `/tmp/error_analysis_phase8.py` from Phase 11 and re-point at the new detections CSV
 
 ## TODO checklist (for the eventual implementor)
 
-- [ ] Create `configs/demo/phase14_ensemble_{b3,b4}.yaml` with the recall-priority recipe
-- [ ] Verify `dockerkartok/herdnet:phase13-nfull-latest` accepts `CE.weight` and `validate_on=recall` overrides — add `LOSS_WEIGHT` and `VALIDATE_ON` env vars to `docker/train_entrypoint.sh` if not (similar to the `BATCH_SIZE` / `NUM_WORKERS` pattern)
+- [ ] Create `configs/demo/phase14_ensemble_{b3,b4}.yaml` with the F5 recipe
+- [ ] Verify `dockerkartok/herdnet:phase13-nfull-latest` accepts `CE.weight` and `validate_on=f5_score` overrides — add `LOSS_WEIGHT` and `VALIDATE_ON` env vars to `docker/train_entrypoint.sh` if not (similar to the `BATCH_SIZE` / `NUM_WORKERS` pattern)
 - [ ] Write `run_phase14.sh` (6-member train + ensemble inference + sweep)
 - [ ] Stage A — train 6 members (locally sequential or remote parallel)
 - [ ] Stage B — ensemble inference + adapt_ts sweep on Phase-13 val
