@@ -597,33 +597,35 @@ class Trainer:
         return self.model
 
     def _early_stopping_check(self, current_val: float, mode: str, epoch: int) -> bool:
-        ''' Check if early stopping criteria is met '''
+        ''' Check if early stopping criteria is met.
+
+        NOTE: This function does NOT mutate self.best_val — _is_best() owns
+        that state. Previously it did, which caused a subtle collision:
+        with early-stopping enabled, this hook fired first and set
+        self.best_val = current_val, so the subsequent self._is_best()
+        check at the caller saw current_val == best_val and returned False.
+        Result: best_model.pth was never written when early-stopping was
+        active. self.best_val is updated by _is_best() (called immediately
+        after this function), which now also honours self.min_delta so the
+        two checks agree on what counts as an improvement.
+        '''
         logger.info(f"Check if early stopping criteria is met")
         if mode == 'min':
-            # For minimization (e.g., loss)
-            if current_val < (self.best_val - self.min_delta):
-                self.best_val = current_val
-                self.wait = 0
-                if self.restore_best_weights:
-                    # Snapshot EMA state when EMA is enabled — best_model.pth
-                    # should reflect the model used for validation.
-                    snapshot_src = self.ema.module if self.ema is not None else self.model
-                    self.best_weights = snapshot_src.state_dict().copy()
-            else:
-                self.wait += 1
-
+            improved = current_val < (self.best_val - self.min_delta)
         elif mode == 'max':
-            # For maximization (e.g., accuracy)
-            if current_val > (self.best_val + self.min_delta):
-                self.best_val = current_val
-                self.wait = 0
-                if self.restore_best_weights:
-                    # Snapshot EMA state when EMA is enabled — best_model.pth
-                    # should reflect the model used for validation.
-                    snapshot_src = self.ema.module if self.ema is not None else self.model
-                    self.best_weights = snapshot_src.state_dict().copy()
-            else:
-                self.wait += 1
+            improved = current_val > (self.best_val + self.min_delta)
+        else:
+            improved = False
+
+        if improved:
+            self.wait = 0
+            if self.restore_best_weights:
+                # Snapshot EMA state when EMA is enabled — best_model.pth
+                # should reflect the model used for validation.
+                snapshot_src = self.ema.module if self.ema is not None else self.model
+                self.best_weights = snapshot_src.state_dict().copy()
+        else:
+            self.wait += 1
 
         # Check if patience is exceeded
         if self.wait >= self.patience:
@@ -955,21 +957,25 @@ class Trainer:
             self.evaluator.current_epoch = epoch
     
     def _is_best(self, val_output: float, mode: str = 'min') -> bool:
-        ''' Method to determine the best model for saving checkpoint '''
-        
+        ''' Method to determine the best model for saving checkpoint.
+
+        Honours self.min_delta so the save threshold matches the
+        early-stopping improvement threshold (set by
+        early_stopping_min_delta). When min_delta=0 (the default for
+        runs that don't configure early stopping) this reduces to a
+        strict > / < comparison — backwards compatible.
+        '''
         if mode == 'min':
-            if val_output < self.best_val:
+            if val_output < (self.best_val - self.min_delta):
                 self.best_val = val_output
                 return True
-            else:
-                return False
-        
-        elif mode =='max':
-            if val_output > self.best_val:
+            return False
+
+        elif mode == 'max':
+            if val_output > (self.best_val + self.min_delta):
                 self.best_val = val_output
                 return True
-            else:
-                return False
+            return False
 
     def _is_best_loss(self, val_output: float) -> bool:
         ''' Method to determine the best model for saving checkpoint '''
