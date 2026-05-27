@@ -21,6 +21,10 @@ ARCHS="${ARCHS:-b3 b4}"
 SEEDS="${SEEDS:-7 42 123}"
 BATCH_SIZE="${BATCH_SIZE:-}"
 NUM_WORKERS="${NUM_WORKERS:-}"
+# Config-name prefix — defaults to phase14, set to phase14b for the
+# recovery recipe (f2_score + CE foreground 3.0 + adapt_ts=0.30).
+CONFIG_PREFIX="${CONFIG_PREFIX:-phase14}"
+PHASE_TAG="${PHASE_TAG:-${CONFIG_PREFIX}}"
 DATA_ROOT="${DATA_ROOT:-/home/christian/data/training_data/2026_05_08_data_scaling}"
 WANDB_PROJECT="${WANDB_PROJECT:-hn_phase14_ensemble}"
 WANDB_FLAG="${WANDB_FLAG:-True}"
@@ -56,9 +60,9 @@ echo "  Wandb:   $WANDB_PROJECT"
 echo "============================================================"
 
 for ARCH in $ARCHS; do
-  CONFIG_NAME="phase14_ensemble_${ARCH}"
+  CONFIG_NAME="${CONFIG_PREFIX}_ensemble_${ARCH}"
   for SEED in $SEEDS; do
-    RUN_NAME="phase14_${ARCH}_s${SEED}"
+    RUN_NAME="${PHASE_TAG}_${ARCH}_s${SEED}"
     WARM_START="$SCRIPT_DIR/best_models/phase8/${ARCH}_seed${SEED}/best_model.pth"
     OUT_DIR="$SCRIPT_DIR/output/${RUN_NAME}/$(date +%Y-%m-%d)/$(date +%H-%M-%S)"
     LOG="$LOG_DIR/${RUN_NAME}_training.log"
@@ -87,7 +91,7 @@ for ARCH in $ARCHS; do
       "wandb_flag=${WANDB_FLAG}" \
       "wandb_project=${WANDB_PROJECT}" \
       "wandb_run=${RUN_NAME}" \
-      "+wandb_tags=[phase14,ensemble,${ARCH},f5_recipe,s${SEED}]" \
+      "+wandb_tags=[${PHASE_TAG},ensemble,${ARCH},s${SEED}]" \
       "${EXTRA[@]}" \
       "hydra.run.dir=${OUT_DIR}" \
       2>&1 | tee "$LOG" \
