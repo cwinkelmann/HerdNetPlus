@@ -219,3 +219,26 @@ If Stage B shows the per-member scores are mis-calibrated (high confidence ≠ h
 ### Refactor TODOs from `docs/refactor.md`
 
 The standing refactor list (config-less inference, drop LossWrapper from inference path, GPS metadata input, image-quality metadata score) is independent of model quality and shouldn't gate Phase 15 — but if any of those land before Phase 15, they may change the implementation surface (e.g. GPS metadata could become a new input modality for a future Phase-15 variant).
+
+## Phase 16 candidates — per-island specialisation
+
+These are bigger-scope changes that need infrastructure (GPS metadata routing, per-island data splits) before they're worth attempting. Park for a separate planning round after Phase 14/15 land.
+
+### Per-island fine-tuning
+
+**Motivation**: Marine iguana subspecies are visually distinct across Galapagos islands (Fernandina, Isabela, Santa Cruz, Española — different colour, size, head shape). Background distributions also shift hard between sites (volcanic black rock vs sand vs lava field), and FP rates are largely background-driven. Phase-13's data-scaling curve plateaued at N≈600 because additional *cross-site* frames add less than additional *within-site* frames at that point — the model already learned cross-island shared features and now needs island-specific FP exposure to improve. Direct evidence of distribution shift in this session: Phase 8 hit F1=0.972 on the FMO05 val; the same recipe hit F1=0.89 on the FPE02 val. ~0.08 F1 gap is the kind of delta per-island specialisation should close.
+
+**Proposal**: Keep a generalist model trained on all pooled annotations as the baseline. For each island where the generalist underperforms (e.g. F1 < 0.92 on a held-out per-island val), **fine-tune for 5–10 epochs from the generalist warm-start** — never from scratch (would forfeit cross-island shared features). Decision rule per-island: fine-tune iff per-island recall lifts ≥ 0.02 over the generalist on the same val.
+
+**Expected gain**: +0.03 to +0.08 F1 per island where fine-tuning is justified — larger than anything Phase 14's recipe ablations produced.
+
+**Dependencies** (each is a prerequisite, not a side effect):
+- **Per-island train/val/test splits** — not currently organised. Annotations need a site-ID column (or filename convention that exposes it), and the data-prep pipeline needs to stratify splits per site.
+- **GPS / site-ID routing at inference time** — the `refactor.md` GPS-metadata-input TODO is load-bearing here. Without it, inference can't dispatch to the right specialist.
+- **Generalist model checkpoint** — should be the production model after Phase 14 / 14c lands, not the Phase-13 single-B4.
+
+**Operational alternative worth considering**: instead of N specialist models, train **one model with site-ID as auxiliary input** (one-hot encoded, concatenated into the backbone features or into a conditioning token). Single model, easier deployment (no routing logic), but only ~60% of the per-island fine-tune lift (estimated +0.02–0.04 F1 vs the generalist). Better choice if operational simplicity dominates.
+
+**Activate if**: Phase 14 / 14c lands a generalist at F1 < 0.93 on the Phase-13 val AND we have ≥ 1000 annotations per site for at least 2–3 sites. If either condition fails, the per-island approach isn't yet worth the data-engineering cost.
+
+**Don't activate if**: the active-learning loop (Phase 14 Stage D / Phase 15 annotation queue) is itself driving site-specific FN reduction faster than a fine-tune would — they overlap on the same problem.
