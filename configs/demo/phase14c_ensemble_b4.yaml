@@ -1,0 +1,87 @@
+# Phase 14c — "Phase 8 redux" on the Phase-13 val.
+#
+# Phase 14 (F5 + CE 2.0) and Phase 14b (F2 + CE 3.0) both produced
+# ensembles that under-performed Phase-13 single B4 (F1 0.872 vs 0.890).
+# Diagnosis: ensembling needs high-precision members; F2/F5 selection
+# trained members at low-precision operating points that ensembling
+# couldn't recover.
+#
+# Phase 14c walks the recipe all the way back to F1 selection with
+# the original CE weight (5.0), keeping only the Phase-14 efficiency
+# wins (early-stop, augmentation_multiplier=1). This is essentially
+# the Phase-8 recipe applied to the Phase-13 val.
+#
+# Hypothesis: if this still doesn't beat 0.92 F1, the val split is
+# fundamentally harder than Phase-8's and the architecture ceiling
+# is real.
+
+defaults:
+  - /losses: herdnet_fmo03
+  - /datasets: data_scaling
+  - /training_settings: evaluator
+  - /model: HerdNetTimmConvNext_Camouflaged_V2
+  - _self_
+
+wandb_flag: True
+seed: 42
+device_name: null
+wandb_project: 'hn_phase14c_ensemble'
+wandb_entity: 'karisu'
+wandb_run: 'phase14c_b4_default'
+wandb_tags: ['phase14c', 'ensemble', 'b4', 'f1_recipe']
+wandb_notes: |
+  Phase 14c — F1 recipe (Phase-8 style) on Phase-13 val.
+    - validate_on=f1_score, select_mode=max
+    - CE foreground weight 5.0 (the Phase-13 / Phase-8 original)
+    - adapt_ts=0.30
+    - early_stopping=True, patience=3, min_delta=0.005
+    - augmentation_multiplier=1
+
+datasets:
+  num_classes: 2
+  class_def:
+    1: 'iguana'
+  train:
+    augmentation_multiplier: 1
+
+training_settings:
+  lr: 8.0e-05
+  epochs: 10
+  batch_size: 8
+  num_workers: 16
+  warmup_iters: 500
+  valid_freq: 1
+  print_freq: 20
+  early_stopping: True
+  early_stopping_patience: 3
+  early_stopping_min_delta: 0.005
+  early_stopping_restore_best_weights: True
+  auto_lr:
+    mode: 'max'
+    patience: 4
+    threshold: 1e-4
+    threshold_mode: 'rel'
+    cooldown: 2
+    min_lr: 1e-8
+    verbose: True
+  evaluator:
+    select_mode: 'max'
+    validate_on: 'f1_score'
+    kwargs:
+      lmds_kwargs:
+        adapt_ts: 0.30
+  visualiser:
+    down_ratio: 4
+  debug_visualiser: null
+
+model:
+  load_from: null
+  resume_from: null
+  kwargs:
+    pretrained: True
+    down_ratio: 4
+    backbone_size: tiny
+
+hydra:
+  run:
+    dir: ./output/phase14c_b4_default/${now:%Y-%m-%d}/${now:%H-%M-%S}
