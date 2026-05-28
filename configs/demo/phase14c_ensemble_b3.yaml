@@ -14,6 +14,9 @@ wandb_project: 'hn_phase14c_ensemble'
 wandb_entity: 'karisu'
 wandb_run: 'phase14c_b3_default'
 wandb_tags: ['phase14c', 'ensemble', 'b3', 'f1_recipe']
+wandb_notes: |
+  Phase 14c ensemble member — B3 (CamouflageHerdNetConvNeXt).
+  F1-recipe (Phase-8 style) — see phase14c_ensemble_b4.yaml for full rationale.
 
 datasets:
   num_classes: 2
