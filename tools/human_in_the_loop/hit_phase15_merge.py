@@ -50,6 +50,19 @@ SUFFIX_GT_ONLY = "_gt"             # GT with no predicted neighbour (review for 
 SUFFIX_PRED_ONLY = "_pred"         # Prediction with no GT neighbour (review for A = missed GT)
 SUFFIX_BORDERLINE = "_borderline"  # Hungarian assigned but distance > radius
 
+# Distinct CVAT marker colours per provenance — picked to be visually
+# distinct and reasonable for colour-vision deficiencies.
+PROVENANCE_COLORS = {
+    SUFFIX_MATCHED:    "#2ca02c",   # green   : model + GT agree
+    SUFFIX_GT_ONLY:    "#2c7fb8",   # blue    : GT only — possible false GT (B)
+    SUFFIX_PRED_ONLY:  "#d62728",   # red     : prediction only — possible missed iguana (A)
+    SUFFIX_BORDERLINE: "#ffcc00",   # yellow  : paired by Hungarian but too far apart (D)
+}
+
+# The canonical class name the Hasty master uses for iguana keypoints.
+# The download step collapses every provenance variant back to this.
+CANONICAL_CLASS_NAME = "iguana_point"
+
 
 @dataclass
 class MergeResult:
@@ -188,7 +201,7 @@ def merge_results_to_hasty(
     results: list[MergeResult],
     hA_reference: "HastyAnnotationV2",
     dataset_name: str,
-    base_class_name: str = "iguana",
+    base_class_name: str = "iguana_point",
     include_matched: bool = False,
 ) -> "HastyAnnotationV2":
     """Convert per-image MergeResult list into a HastyAnnotationV2.
@@ -253,12 +266,84 @@ def merge_results_to_hasty(
         )
         images.append(new_img)
 
+    # Inject the 4 provenance label-classes (with colors) into the existing
+    # reference label_classes list so CVAT shows distinct markers per
+    # provenance. Existing classes are preserved — reviewers can still
+    # re-type to e.g. "not_iguana_but_similar_look" if they want.
+    label_classes = _label_classes_with_provenance(
+        hA_reference.label_classes,
+        base_class_name=base_class_name,
+    )
+
     return HastyAnnotationV2(
         project_name=dataset_name,
         images=images,
         export_format_version="1.1",
-        label_classes=hA_reference.label_classes,
+        label_classes=label_classes,
     )
+
+
+def _label_classes_with_provenance(existing, base_class_name: str):
+    """Return existing label_classes + 4 provenance-tagged variants.
+
+    Each provenance variant inherits the existing class's attributes list if
+    a base class is found in ``existing``; otherwise it uses an empty list.
+    Colors are pulled from PROVENANCE_COLORS.
+    """
+    import uuid
+
+    # Try to mimic the base class's attribute/description so CVAT shows
+    # the same edit affordances.
+    base = None
+    for lc in existing:
+        # ``existing`` is a list of LabelClass models (or dicts depending on
+        # how Hasty was loaded). Handle both shapes.
+        name = lc.class_name if hasattr(lc, "class_name") else lc.get("class_name")
+        if name == base_class_name or name == CANONICAL_CLASS_NAME:
+            base = lc
+            break
+
+    def _attr_of(lc):
+        return lc.attributes if hasattr(lc, "attributes") else lc.get("attributes", [])
+
+    base_attrs = _attr_of(base) if base is not None else []
+
+    # Detect whether existing entries are pydantic models (HastyAnnotationV2's
+    # LabelClass) or plain dicts. Construct in the matching shape.
+    use_models = bool(existing) and hasattr(existing[0], "model_dump")
+    if use_models:
+        LabelClass = type(existing[0])
+    else:
+        LabelClass = None
+
+    new_entries = []
+    max_norder = 0
+    for lc in existing:
+        n = lc.norder if hasattr(lc, "norder") else lc.get("norder", 0) or 0
+        try:
+            max_norder = max(max_norder, float(n))
+        except (TypeError, ValueError):
+            pass
+
+    for i, (suffix, color) in enumerate(PROVENANCE_COLORS.items(), start=1):
+        payload = {
+            "class_id": str(uuid.uuid4()),
+            "parent_class_id": None,
+            "class_name": f"{base_class_name}{suffix}",
+            "class_type": "object",
+            "color": color,
+            "norder": float(max_norder + i),
+            "icon_url": None,
+            "attributes": list(base_attrs) if base_attrs else [],
+            "description": f"Phase-15 provenance: {suffix.lstrip('_')}",
+            "use_description_as_prompt": False,
+        }
+        if use_models:
+            new_entries.append(LabelClass(**payload))
+        else:
+            new_entries.append(payload)
+
+    return list(existing) + new_entries
 
 
 def classify_corrected_label(class_name: str, was_moved: bool, was_deleted: bool) -> str:

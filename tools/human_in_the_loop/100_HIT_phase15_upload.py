@@ -25,19 +25,42 @@ Plan: ``docs/phase15_annotation_cleanup_loop.md`` (this repo).
 from __future__ import annotations
 
 import copy
+import os
 from pathlib import Path
 
 import pandas as pd
 from loguru import logger
 
-from active_learning.config.dataset_filter import (
+
+# Load FIFTYONE_CVAT_URL / USERNAME / PASSWORD from the active-learning
+# repo's .env *before* fiftyone imports so the CVAT integration sees them.
+# Falls back silently if the file isn't present (the user can also export
+# the vars manually).
+def _load_cvat_env() -> None:
+    candidate = Path("/home/christian/hnee/active-learning/.env")
+    if not candidate.exists():
+        return
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        logger.warning("python-dotenv not available — CVAT credentials must be exported manually")
+        return
+    load_dotenv(candidate, override=False)
+    for k in ("FIFTYONE_CVAT_URL", "FIFTYONE_CVAT_USERNAME"):
+        if k in os.environ:
+            logger.info(f"loaded {k} from {candidate}")
+
+
+_load_cvat_env()
+
+from active_learning.config.dataset_filter import (  # noqa: E402
     DatasetCorrectionConfig,
     DatasetCorrectionReportConfig,
 )
-from active_learning.util.evaluation.evaluation import submit_for_cvat_evaluation
-from com.biospheredata.types.HastyAnnotationV2 import HastyAnnotationV2
+from active_learning.util.evaluation.evaluation import submit_for_cvat_evaluation  # noqa: E402
+from com.biospheredata.types.HastyAnnotationV2 import HastyAnnotationV2  # noqa: E402
 
-import fiftyone as fo
+import fiftyone as fo  # noqa: E402
 
 # Local helper (in this directory). When running directly add this dir to PYTHONPATH
 # or set `python -m scripts.human_in_the_loop.100_HIT_phase15_upload` semantics.
@@ -59,7 +82,7 @@ def phase15_cvat_upload(
     report_path: Path,
     pred_score_threshold: float = 0.5,
     include_matched: bool = False,
-    base_class_name: str = "iguana",
+    base_class_name: str = "iguana_point",
 ) -> DatasetCorrectionReportConfig:
     """Hungarian-merge GT+predictions and push to CVAT for review.
 

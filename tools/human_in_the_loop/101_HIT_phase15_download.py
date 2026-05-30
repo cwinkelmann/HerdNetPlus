@@ -40,8 +40,24 @@ from pathlib import Path
 
 from loguru import logger
 
-from active_learning.config.dataset_filter import DatasetCorrectionReportConfig
-from com.biospheredata.types.HastyAnnotationV2 import (
+
+# Load FIFTYONE_CVAT_* before fiftyone is imported (helper.py imports it).
+def _load_cvat_env() -> None:
+    candidate = Path("/home/christian/hnee/active-learning/.env")
+    if not candidate.exists():
+        return
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        logger.warning("python-dotenv not available — CVAT credentials must be exported manually")
+        return
+    load_dotenv(candidate, override=False)
+
+
+_load_cvat_env()
+
+from active_learning.config.dataset_filter import DatasetCorrectionReportConfig  # noqa: E402
+from com.biospheredata.types.HastyAnnotationV2 import (  # noqa: E402
     AnnotatedImage,
     HastyAnnotationV2,
     ImageLabel,
@@ -49,7 +65,7 @@ from com.biospheredata.types.HastyAnnotationV2 import (
 )
 
 # Re-use the existing CVAT download path. This wraps cvat2hasty + foDataset2Hasty.
-from scripts.human_in_the_loop.helper import hit_cvat_download  # type: ignore
+from scripts.human_in_the_loop.helper import hit_cvat_download  # type: ignore  # noqa: E402
 
 # Local helper (in this directory).
 sys.path.append(str(Path(__file__).parent))
@@ -59,6 +75,7 @@ from hit_phase15_merge import (
     SUFFIX_PRED_ONLY,
     SUFFIX_MATCHED,
     SUFFIX_BORDERLINE,
+    CANONICAL_CLASS_NAME,
 )
 
 
@@ -194,7 +211,7 @@ def apply_corrections_to_master(
         elif category == "C":  # relocate
             _relocate_keypoint_near(master_img, pre_xy, (x_new, y_new), radius=10)
         elif category == "A":  # missed iguana — add to master (pre_label was pred_only)
-            _add_keypoint(master_img, (x_new, y_new), class_name="iguana")
+            _add_keypoint(master_img, (x_new, y_new), class_name=CANONICAL_CLASS_NAME)
 
     # ---- Brand-new labels the reviewer drew that weren't in the upload ----
     for label_id in new_ids:
@@ -220,7 +237,7 @@ def apply_corrections_to_master(
         })
         counts.A += 1
         if image_name and image_name in master_image_by_name:
-            _add_keypoint(master_image_by_name[image_name], (x, y), class_name="iguana")
+            _add_keypoint(master_image_by_name[image_name], (x, y), class_name=CANONICAL_CLASS_NAME)
 
     # ---- Append edit log ----
     edit_log_path.parent.mkdir(parents=True, exist_ok=True)
