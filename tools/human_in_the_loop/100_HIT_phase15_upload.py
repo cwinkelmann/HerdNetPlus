@@ -87,26 +87,44 @@ from hit_phase15_merge import (
 
 def _preflight_match_to_hasty_datasets(
     image_names: list[str], hA_master: HastyAnnotationV2
-) -> tuple[dict[str, str], list[str]]:
-    """Build {image_name -> hasty dataset_name} from the master Hasty.
+) -> tuple[dict[str, dict[str, str]], list[str]]:
+    """Match Phase-13 tile filenames to Hasty (dataset_name, image_name).
 
-    Returns (mapping, missing). Caller refuses to upload if missing is
-    non-empty — without a known dataset_name the download step can't route
-    edits back to the right Hasty dataset.
+    Phase-13 val/test tiles use a prefixed naming convention:
+        ``<hasty_dataset_name>___<hasty_image_name>``
+    while the Hasty master stores just ``<hasty_image_name>`` with
+    ``dataset_name`` carried separately. We split on the ``___`` separator
+    and verify (dataset_name, image_name) is in the master.
+
+    Returns ({tile_name -> {"dataset_name": ..., "hasty_image_name": ...}},
+             missing). The download step uses this mapping to find the
+    right master Hasty image to update — including when two datasets share
+    the same image_name (e.g. multiple sites with "DJI_0141.JPG").
     """
-    image_to_dataset: dict[str, str] = {}
+    by_dataset_and_name: set[tuple[str, str]] = set()
+    by_name_only: dict[str, str] = {}
     for img in hA_master.images:
-        if img.image_name and img.dataset_name:
-            image_to_dataset.setdefault(img.image_name, img.dataset_name)
+        if not img.image_name or not img.dataset_name:
+            continue
+        by_dataset_and_name.add((img.dataset_name, img.image_name))
+        # Fallback for tile names without a ___ prefix: first hit wins.
+        by_name_only.setdefault(img.image_name, img.dataset_name)
 
-    mapping: dict[str, str] = {}
+    mapping: dict[str, dict[str, str]] = {}
     missing: list[str] = []
-    for image_name in image_names:
-        ds = image_to_dataset.get(image_name)
-        if ds is None:
-            missing.append(image_name)
-        else:
-            mapping[image_name] = ds
+    for tile_name in image_names:
+        # 1. Try the prefixed convention <dataset>___<image>.
+        if "___" in tile_name:
+            ds, hname = tile_name.split("___", 1)
+            if (ds, hname) in by_dataset_and_name:
+                mapping[tile_name] = {"dataset_name": ds, "hasty_image_name": hname}
+                continue
+        # 2. Fallback: lookup by image_name only.
+        ds = by_name_only.get(tile_name)
+        if ds is not None:
+            mapping[tile_name] = {"dataset_name": ds, "hasty_image_name": tile_name}
+            continue
+        missing.append(tile_name)
     return mapping, missing
 
 
@@ -128,15 +146,21 @@ def _build_fiftyone_keypoints(
                 continue  # caller should compute_metadata() after add
             nx = max(0.0, min(1.0, kp.x / width))
             ny = max(0.0, min(1.0, kp.y / height))
-            score = (label.attributes or {}).get("score") if label.attributes else None
+            # Score is preserved in the intermediate Hasty file's
+            # ImageLabel.attributes — we don't push it into fiftyone here
+            # (fo.Keypoint's `confidence` field expects a list-per-point,
+            # not a scalar, and the score isn't load-bearing for the
+            # human review).
+            tags = []
+            if label.id:
+                # Carry label_id through CVAT in tags so the download step
+                # can diff pre vs post by id.
+                tags.append(f"id:{label.id}")
             keypoints.append(
                 fo.Keypoint(
                     label=label.class_name,
                     points=[(nx, ny)],
-                    confidence=float(score) if score is not None else None,
-                    # Carry the label_id through CVAT in tags so the
-                    # download step can diff pre vs post by id.
-                    tags=[f"id:{label.id}"] if label.id else None,
+                    tags=tags if tags else None,
                 )
             )
     return fo.Keypoints(keypoints=keypoints)
@@ -257,9 +281,10 @@ def phase15_cvat_upload(
         )
     mapping_path = report_path / f"{config.dataset_name}_image_to_dataset.json"
     mapping_path.write_text(json.dumps(image_to_dataset, indent=2))
+    n_distinct_datasets = len({m["dataset_name"] for m in image_to_dataset.values()})
     logger.info(
-        f"PRE-FLIGHT OK: all {len(image_to_dataset)} input images map to a Hasty dataset "
-        f"({len(set(image_to_dataset.values()))} distinct datasets). Mapping at {mapping_path}"
+        f"PRE-FLIGHT OK: all {len(image_to_dataset)} input images map to a Hasty record "
+        f"({n_distinct_datasets} distinct datasets). Mapping at {mapping_path}"
     )
 
     # Build the intermediate Hasty (provenance class names + colors).
@@ -269,6 +294,7 @@ def phase15_cvat_upload(
         dataset_name=config.dataset_name,
         base_class_name=base_class_name,
         include_matched=include_matched,
+        images_path=config.images_path,
     )
 
     # Persist the intermediate Hasty — used by the download step.
@@ -306,8 +332,13 @@ def phase15_cvat_upload(
         sample["detection"] = _build_fiftyone_keypoints(hA_image, base_class_name)
         # Stash provenance + the master-Hasty dataset_name on the sample so
         # the download step can recover it without re-querying the master.
-        sample["hasty_dataset_name"] = image_to_dataset[hA_image.image_name]
-        sample["phase15_image_name"] = hA_image.image_name
+        # Map this tile back to its Hasty (dataset_name, image_name) — the
+        # download step uses both to look up the right master record (image
+        # names alone aren't unique across datasets, e.g. DJI_0141.JPG).
+        route = image_to_dataset[hA_image.image_name]
+        sample["hasty_dataset_name"] = route["dataset_name"]
+        sample["hasty_image_name"] = route["hasty_image_name"]
+        sample["phase15_tile_name"] = hA_image.image_name
         dataset.add_sample(sample)
         n_samples += 1
     logger.info(f"Added {n_samples} samples to fiftyone dataset '{config.dataset_name}'.")
@@ -323,12 +354,18 @@ def phase15_cvat_upload(
         f"Launching CVAT task: project={CVAT_PROJECT_NAME!r}, "
         f"organization={CVAT_ORGANIZATION!r}, anno_key={config.dataset_name!r}"
     )
+    # task_size keeps each CVAT task small enough to avoid 504 Gateway
+    # Timeouts on the data upload POST (the public CVAT instance times out
+    # when a single task tries to ingest more than ~150-200 MB of imagery).
+    # All tasks land in the same project (Hasty_Corr), so the reviewer sees
+    # them grouped.
     dataset.annotate(
         anno_key=config.dataset_name,
         label_field="detection",
         label_type="keypoints",
         classes=provenance_classes,
         attributes=["score"],
+        task_size=50,
         launch_editor=True,
         organization=CVAT_ORGANIZATION,
         project_name=CVAT_PROJECT_NAME,

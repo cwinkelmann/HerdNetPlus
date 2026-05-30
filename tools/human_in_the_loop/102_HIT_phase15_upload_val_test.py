@@ -108,6 +108,16 @@ def _concat_csvs(paths: list[Path], dst: Path) -> int:
 def main() -> None:
     STAGE_ROOT.mkdir(parents=True, exist_ok=True)
 
+    # Symlink the Hasty master into the staging dir so the upload helper's
+    # subset_base_path-relative lookup resolves to the production file.
+    hasty_symlink = STAGE_ROOT / HASTY_MASTER.name
+    if not hasty_symlink.exists():
+        try:
+            hasty_symlink.symlink_to(HASTY_MASTER.resolve())
+        except OSError:
+            shutil.copy2(HASTY_MASTER, hasty_symlink)
+        logger.info(f"Symlinked Hasty master into staging: {hasty_symlink}")
+
     logger.info("Symlinking val + test images into combined staging dir...")
     n_symlinked = _symlink_images([VAL_IMG_DIR, TEST_IMG_DIR], STAGE_IMAGES)
     logger.info(f"  {n_symlinked} image files in {STAGE_IMAGES}")
@@ -117,7 +127,9 @@ def main() -> None:
     n_det = _concat_csvs([VAL_DET_CSV, TEST_DET_CSV], STAGE_DET_CSV)
     logger.info(f"Wrote combined detections: {STAGE_DET_CSV} ({n_det} rows)")
 
-    dataset_name = f"phase15_iter0_val_test_{date.today().isoformat()}"
+    # fiftyone requires the anno_key to be a valid Python identifier — no
+    # dashes, no leading digit — so use date with underscores.
+    dataset_name = f"phase15_iter0_val_test_{date.today().strftime('%Y_%m_%d')}"
     config = DatasetCorrectionConfig(
         analysis_date=date.today().isoformat(),
         dataset_name=dataset_name,

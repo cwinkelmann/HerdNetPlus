@@ -203,6 +203,7 @@ def merge_results_to_hasty(
     dataset_name: str,
     base_class_name: str = "iguana_point",
     include_matched: bool = False,
+    images_path: "Path | None" = None,
 ) -> "HastyAnnotationV2":
     """Convert per-image MergeResult list into a HastyAnnotationV2.
 
@@ -251,19 +252,33 @@ def merge_results_to_hasty(
 
         ref_img = ref_by_name.get(r.image)
         if ref_img is None:
-            logger.warning(
-                f"{r.image} not in reference Hasty — skipping. "
-                f"Make sure hA_reference contains every image you want to review."
+            # Reference Hasty doesn't have this image (common for the
+            # Phase-13 use case: tiles use the `<dataset>___<name>` convention
+            # while the Hasty master stores raw `<name>` with `dataset_name`
+            # carried separately). Build a minimal AnnotatedImage; read
+            # width/height from the tile on disk if images_path is given.
+            width, height = 0, 0
+            if images_path is not None:
+                tile_path = images_path / r.image
+                if tile_path.exists():
+                    import PIL.Image as _PIL
+                    with _PIL.open(tile_path) as im:
+                        width, height = im.size
+            new_img = AnnotatedImage(
+                image_name=r.image,
+                dataset_name=dataset_name,
+                labels=labels,
+                width=width,
+                height=height,
             )
-            continue
-
-        new_img = AnnotatedImage(
-            **{
-                **ref_img.model_dump(exclude={"labels"}),
-                "labels": labels,
-                "dataset_name": dataset_name,
-            }
-        )
+        else:
+            new_img = AnnotatedImage(
+                **{
+                    **ref_img.model_dump(exclude={"labels"}),
+                    "labels": labels,
+                    "dataset_name": dataset_name,
+                }
+            )
         images.append(new_img)
 
     # Inject the 4 provenance label-classes (with colors) into the existing
