@@ -147,6 +147,7 @@ def phase15_cvat_upload(
     report_path: Path,
     pred_score_threshold: float = 0.5,
     include_matched: bool = False,
+    only_fp_images: bool = True,
     base_class_name: str = "iguana_point",
 ) -> DatasetCorrectionReportConfig:
     """Hungarian-merge GT+predictions and push to CVAT for review.
@@ -199,6 +200,29 @@ def phase15_cvat_upload(
         raise ValueError(
             "No disagreement found between GT and predictions — nothing to review."
         )
+
+    if only_fp_images:
+        # Drop images whose only candidates are gt_only / matched / borderline —
+        # keep only images that have at least one pred_only point (= apparent
+        # false positive, which Phase-13 error analysis showed are the
+        # highest-value review candidates).
+        kept_results = [r for r in results if len(r.pred_only) > 0]
+        n_dropped = len(results) - len(kept_results)
+        kept_stats = merge_summary(kept_results)
+        logger.info(
+            f"only_fp_images=True — keeping {len(kept_results)} of "
+            f"{len(results)} images (dropped {n_dropped} images with no FPs)."
+        )
+        logger.info(
+            f"After filter: matched={kept_stats['matched']}, "
+            f"gt_only={kept_stats['gt_only']}, pred_only={kept_stats['pred_only']}, "
+            f"borderline={kept_stats['borderline']}"
+        )
+        results = kept_results
+        if not results:
+            raise ValueError(
+                "After only_fp_images filter, no images remain — nothing to upload."
+            )
 
     logger.info(f"Loading Hasty GT: {config.subset_base_path / config.hasty_ground_truth_annotation_name}")
     hA_ground_truth = HastyAnnotationV2.from_file(

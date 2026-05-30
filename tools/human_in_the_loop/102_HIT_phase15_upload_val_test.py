@@ -70,8 +70,9 @@ STAGE_DET_CSV = STAGE_ROOT / "combined_detections.csv"
 REPORT_DIR = STAGE_ROOT / "report"
 
 # ---- knobs ----
-PRED_SCORE_THRESHOLD = 0.5   # filter low-confidence noise; tune up to 0.95 for high-precision review
+PRED_SCORE_THRESHOLD = 0.5   # filter low-confidence noise; bump higher for fewer candidates
 INCLUDE_MATCHED = False      # iter 0: review disagreements only
+ONLY_FP_IMAGES = True        # only upload images that have at least one pred_only candidate
 MATCH_RADIUS_PX = 100        # matches the evaluator's threshold
 BOX_SIZE_PX = 400            # CVAT crop window per label
 
@@ -145,6 +146,7 @@ def main() -> None:
         report_path=REPORT_DIR,
         pred_score_threshold=PRED_SCORE_THRESHOLD,
         include_matched=INCLUDE_MATCHED,
+        only_fp_images=ONLY_FP_IMAGES,
     )
     logger.info("=== Upload complete ===")
     logger.info(f"  report dir:       {REPORT_DIR}")
