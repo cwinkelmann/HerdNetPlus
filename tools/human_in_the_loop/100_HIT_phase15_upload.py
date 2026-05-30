@@ -25,10 +25,12 @@ Plan: ``docs/phase15_annotation_cleanup_loop.md`` (this repo).
 from __future__ import annotations
 
 import copy
+import json
 import os
 from pathlib import Path
 
 import pandas as pd
+import PIL.Image
 from loguru import logger
 
 
@@ -57,10 +59,14 @@ from active_learning.config.dataset_filter import (  # noqa: E402
     DatasetCorrectionConfig,
     DatasetCorrectionReportConfig,
 )
-from active_learning.util.evaluation.evaluation import submit_for_cvat_evaluation  # noqa: E402
 from com.biospheredata.types.HastyAnnotationV2 import HastyAnnotationV2  # noqa: E402
 
 import fiftyone as fo  # noqa: E402
+
+# CVAT project name — every Phase-15 task lands in the same project so
+# the reviewer can find them all in one place.
+CVAT_PROJECT_NAME = "Hasty_Corr"
+CVAT_ORGANIZATION = "IguanasFromAbove"
 
 # Local helper (in this directory). When running directly add this dir to PYTHONPATH
 # or set `python -m scripts.human_in_the_loop.100_HIT_phase15_upload` semantics.
@@ -70,11 +76,70 @@ from hit_phase15_merge import (
     merge_dataset,
     merge_summary,
     merge_results_to_hasty,
+    PROVENANCE_COLORS,
     SUFFIX_GT_ONLY,
     SUFFIX_PRED_ONLY,
     SUFFIX_MATCHED,
     SUFFIX_BORDERLINE,
+    CANONICAL_CLASS_NAME,
 )
+
+
+def _preflight_match_to_hasty_datasets(
+    image_names: list[str], hA_master: HastyAnnotationV2
+) -> tuple[dict[str, str], list[str]]:
+    """Build {image_name -> hasty dataset_name} from the master Hasty.
+
+    Returns (mapping, missing). Caller refuses to upload if missing is
+    non-empty — without a known dataset_name the download step can't route
+    edits back to the right Hasty dataset.
+    """
+    image_to_dataset: dict[str, str] = {}
+    for img in hA_master.images:
+        if img.image_name and img.dataset_name:
+            image_to_dataset.setdefault(img.image_name, img.dataset_name)
+
+    mapping: dict[str, str] = {}
+    missing: list[str] = []
+    for image_name in image_names:
+        ds = image_to_dataset.get(image_name)
+        if ds is None:
+            missing.append(image_name)
+        else:
+            mapping[image_name] = ds
+    return mapping, missing
+
+
+def _build_fiftyone_keypoints(
+    hA_image, base_class_name: str
+) -> "fo.Keypoints":
+    """Convert one AnnotatedImage's labels to a fiftyone Keypoints field.
+
+    Coordinates are normalised to [0, 1] using the image width/height
+    stored on the AnnotatedImage. If width/height aren't set we fall back
+    to reading the file (slower).
+    """
+    width = float(getattr(hA_image, "width", 0) or 0)
+    height = float(getattr(hA_image, "height", 0) or 0)
+    keypoints: list[fo.Keypoint] = []
+    for label in hA_image.labels:
+        for kp in label.keypoints or []:
+            if width <= 0 or height <= 0:
+                continue  # caller should compute_metadata() after add
+            nx = max(0.0, min(1.0, kp.x / width))
+            ny = max(0.0, min(1.0, kp.y / height))
+            score = (label.attributes or {}).get("score") if label.attributes else None
+            keypoints.append(
+                fo.Keypoint(
+                    label=label.class_name,
+                    points=[(nx, ny)],
+                    confidence=float(score) if score is not None else None,
+                    # Carry the label_id through CVAT in tags so the
+                    # download step can diff pre vs post by id.
+                    tags=[f"id:{label.id}"] if label.id else None,
+                )
+            )
+    return fo.Keypoints(keypoints=keypoints)
 
 
 def phase15_cvat_upload(
@@ -145,47 +210,109 @@ def phase15_cvat_upload(
         config.reference_base_path / config.hasty_reference_annotation_name
     )
 
+    # --- PRE-FLIGHT: match every input image to a Hasty dataset_name -----
+    # Without this, the download step can't route corrections back into the
+    # right Hasty dataset and the master would silently end up wrong.
+    input_image_names = [r.image for r in results]
+    image_to_dataset, missing = _preflight_match_to_hasty_datasets(
+        input_image_names, hA_reference
+    )
+    if missing:
+        logger.error(
+            f"{len(missing)} / {len(input_image_names)} input images NOT FOUND "
+            f"in the Hasty master at {config.reference_base_path / config.hasty_reference_annotation_name}."
+        )
+        for m in missing[:15]:
+            logger.error(f"  missing: {m}")
+        if len(missing) > 15:
+            logger.error(f"  (+ {len(missing) - 15} more)")
+        raise RuntimeError(
+            "Pre-flight failed: cannot route these images to a Hasty dataset on download. "
+            "Run /data/mnt/storage/Iguanas_From_Above/training_data/2026_05_06/unzipped_images_rsync "
+            "and the master Hasty manifest to be sure the images you're trying to review are present."
+        )
+    mapping_path = report_path / f"{config.dataset_name}_image_to_dataset.json"
+    mapping_path.write_text(json.dumps(image_to_dataset, indent=2))
+    logger.info(
+        f"PRE-FLIGHT OK: all {len(image_to_dataset)} input images map to a Hasty dataset "
+        f"({len(set(image_to_dataset.values()))} distinct datasets). Mapping at {mapping_path}"
+    )
+
+    # Build the intermediate Hasty (provenance class names + colors).
     hA_merged = merge_results_to_hasty(
         results=results,
-        hA_reference=hA_ground_truth,  # we need *image metadata* from GT, not reference
+        hA_reference=hA_ground_truth,
         dataset_name=config.dataset_name,
         base_class_name=base_class_name,
         include_matched=include_matched,
     )
-    # Borrow label_classes from the production reference so CVAT recognises them.
-    hA_merged.label_classes = hA_reference.label_classes
 
-    # Persist the intermediate Hasty — this is what download time will read
-    # to recover provenance and the pre-correction state.
+    # Persist the intermediate Hasty — used by the download step.
     hA_intermediate_path = config.corrected_path / f"{config.dataset_name}_phase15_intermediate_hasty.json"
     hA_merged.save(hA_intermediate_path)
     report_config.hA_prediction_path = hA_intermediate_path
     logger.info(f"Wrote intermediate Hasty: {hA_intermediate_path}")
 
-    # Build a fiftyone dataset + push to CVAT — same pattern as
-    # helper.py::hit_fp_gt_cvat_upload.
+    # ---- Build the fiftyone dataset directly from the merged Hasty ------
     try:
         fo.delete_dataset(config.dataset_name)
     except Exception:
         pass
     dataset = fo.Dataset(name=config.dataset_name)
-    dataset.default_classes = [
-        f"{base_class_name}{SUFFIX_GT_ONLY}",
-        f"{base_class_name}{SUFFIX_PRED_ONLY}",
-        f"{base_class_name}{SUFFIX_MATCHED}",
-        f"{base_class_name}{SUFFIX_BORDERLINE}",
+    provenance_classes = [
+        f"{base_class_name}{s}" for s in
+        (SUFFIX_GT_ONLY, SUFFIX_PRED_ONLY, SUFFIX_MATCHED, SUFFIX_BORDERLINE)
     ]
+    dataset.default_classes = provenance_classes
     dataset.persistent = True
 
-    submit_for_cvat_evaluation(
-        config=config,
-        report_config=report_config,
-        hA_prediction=hA_merged,
-        dataset=dataset,
-    )
+    n_samples = 0
+    for hA_image in hA_merged.images:
+        if not hA_image.labels:
+            continue  # skip images with no flagged candidates
+        image_path = config.images_path / hA_image.image_name
+        if not image_path.exists():
+            logger.warning(f"image file missing on disk, skipping: {image_path}")
+            continue
+        # Backfill width/height if Hasty doesn't have them (some exports don't).
+        if not getattr(hA_image, "width", None) or not getattr(hA_image, "height", None):
+            with PIL.Image.open(image_path) as im:
+                hA_image.width, hA_image.height = im.size
+        sample = fo.Sample(filepath=str(image_path))
+        sample["detection"] = _build_fiftyone_keypoints(hA_image, base_class_name)
+        # Stash provenance + the master-Hasty dataset_name on the sample so
+        # the download step can recover it without re-querying the master.
+        sample["hasty_dataset_name"] = image_to_dataset[hA_image.image_name]
+        sample["phase15_image_name"] = hA_image.image_name
+        dataset.add_sample(sample)
+        n_samples += 1
+    logger.info(f"Added {n_samples} samples to fiftyone dataset '{config.dataset_name}'.")
+    dataset.compute_metadata()
+
+    # Write the report BEFORE launching CVAT so the download step can find
+    # everything even if CVAT submission times out / needs a retry.
     report_config_path = report_path / "report.json"
     report_config.save(report_config_path)
-    logger.info(f"Wrote report config (use this in the download step): {report_config_path}")
+
+    # ---- Push to CVAT --------------------------------------------------
+    logger.info(
+        f"Launching CVAT task: project={CVAT_PROJECT_NAME!r}, "
+        f"organization={CVAT_ORGANIZATION!r}, anno_key={config.dataset_name!r}"
+    )
+    dataset.annotate(
+        anno_key=config.dataset_name,
+        label_field="detection",
+        label_type="keypoints",
+        classes=provenance_classes,
+        attributes=["score"],
+        launch_editor=True,
+        organization=CVAT_ORGANIZATION,
+        project_name=CVAT_PROJECT_NAME,
+    )
+    logger.info(
+        f"Done. Report config (download step input): {report_config_path}\n"
+        f"  Image->Hasty-dataset mapping: {mapping_path}"
+    )
     return report_config
 
 

@@ -330,6 +330,27 @@ def phase15_cvat_download_and_update(
     logger.info(f"Loading master Hasty to update: {master_hasty_path}")
     hA_master = HastyAnnotationV2.from_file(master_hasty_path)
 
+    # Sanity-check: every image referenced by the pre-correction Hasty must
+    # exist in the master Hasty. If not, the master would silently miss
+    # edits. The upload step already validated this, but we re-check here
+    # because the master may have been edited / reloaded in the meantime.
+    master_image_names = {img.image_name for img in hA_master.images}
+    missing_from_master = sorted(
+        {img.image_name for img in hA_pre.images} - master_image_names
+    )
+    if missing_from_master:
+        logger.error(
+            f"{len(missing_from_master)} pre-correction images are NOT in the "
+            f"master Hasty — edits for these would be silently lost."
+        )
+        for m in missing_from_master[:10]:
+            logger.error(f"  missing: {m}")
+        raise RuntimeError(
+            "Master Hasty does not contain all images referenced in the upload. "
+            "Inspect the master at "
+            f"{master_hasty_path} and confirm the right file is being updated."
+        )
+
     hA_master_updated, counts = apply_corrections_to_master(
         hA_pre=hA_pre,
         hA_post=hA_post,
