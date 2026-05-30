@@ -71,7 +71,9 @@ REPORT_DIR = STAGE_ROOT / "report"
 
 # ---- knobs ----
 PRED_SCORE_THRESHOLD = 0.5   # filter low-confidence noise; bump higher for fewer candidates
-INCLUDE_MATCHED = False      # iter 0: review disagreements only
+INCLUDE_MATCHED = True       # include matched GT (green markers) for context so the reviewer
+                             # can tell whether a red candidate sits near an existing GT
+                             # vs. is a genuinely new iguana
 ONLY_FP_IMAGES = True        # only upload images that have at least one pred_only candidate
 MATCH_RADIUS_PX = 100        # matches the evaluator's threshold
 BOX_SIZE_PX = 400            # CVAT crop window per label
