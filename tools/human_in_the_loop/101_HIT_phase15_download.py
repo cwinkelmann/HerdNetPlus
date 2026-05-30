@@ -511,8 +511,17 @@ def apply_corrections_to_master(
                 "notes": "deleted_in_cvat",
             })
             _bump(counts, category)
-            if image_name in master_image_by_name and category == "B":
-                _remove_keypoint_near(master_image_by_name[image_name], pre_xy, radius=10)
+            if image_name in master_image_by_name:
+                if category == "B":
+                    _remove_keypoint_near(master_image_by_name[image_name], pre_xy, radius=10)
+                elif category == "H":
+                    # Deleted pred/borderline -> hard negative example. Add to
+                    # master at the deleted position as not_iguana_but_similar_look.
+                    _add_keypoint(
+                        master_image_by_name[image_name],
+                        pre_xy,
+                        class_name="not_iguana_but_similar_look",
+                    )
 
         # NEWLY DRAWN (post with no pre match). A or H based on class.
         for j in unmatched_post:

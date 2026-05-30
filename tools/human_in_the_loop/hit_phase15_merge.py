@@ -396,33 +396,40 @@ def classify_corrected_label(
 ) -> str:
     """Map a (pre, post) label pair back to a Phase-15 edit category.
 
-    Categories:
-      A: missed iguana    — pred_only kept as an iguana class -> add to master as iguana_point
-      B: false GT         — gt_only/matched deleted -> remove from master
-      C: relocation       — same label moved >1 px (and still iguana)
-      D: borderline       — borderline kept as iguana -> flag for second opinion
-      E: confirmed FP     — pred_only/borderline deleted
-      H: hard_negative    — pred_only/borderline KEPT but reviewer changed
-                            the class to a non-iguana (e.g. not_iguana_but_similar_look)
-                            -> add to master under that non-iguana class
+    Implicit-action rule (no class re-typing required in CVAT):
+      A: kept as iguana   — pred_only/borderline kept by reviewer
+                            -> add to master as iguana_point
+      B: false GT removed — gt_only/matched DELETED by reviewer
+                            -> remove from master
+      C: relocated        — pre <-> post position differs >1 px (still iguana)
+      H: hard_negative    — pred_only/borderline DELETED by reviewer
+                            OR pred_only/borderline KEPT with reviewer-set
+                            non-iguana class (e.g. not_iguana_but_similar_look)
+                            -> add to master at that position as a non-iguana
+                            label (default: not_iguana_but_similar_look)
+
+    Categories D (borderline) and E (confirmed FP) from the previous version
+    collapse into A and H respectively under the simpler rule.
     """
     pre = pre_class_name.lower() if pre_class_name else ""
 
     if was_deleted:
         if pre.endswith(SUFFIX_GT_ONLY) or pre.endswith(SUFFIX_MATCHED):
-            return "B"  # deleted GT-anchored label
-        return "E"  # pred_only or borderline deleted
+            return "B"  # GT was wrong, remove
+        if pre.endswith(SUFFIX_PRED_ONLY) or pre.endswith(SUFFIX_BORDERLINE):
+            return "H"  # deleted model-suggested point = hard negative
+        return "H"  # unknown provenance, treat conservatively as hard-neg
 
-    # Kept (not deleted). Detect hard-negative promotion via class change.
+    # Kept (not deleted).
+    # Explicit class re-typing to a non-iguana class also routes to H
+    # (the optional path the reviewer can use to specify the negative type).
     if post_class_name and not is_iguana_class(post_class_name):
         return "H"
 
     if was_moved:
         return "C"
-    if pre.endswith(SUFFIX_PRED_ONLY):
-        return "A"
-    if pre.endswith(SUFFIX_BORDERLINE):
-        return "D"
+    if pre.endswith(SUFFIX_PRED_ONLY) or pre.endswith(SUFFIX_BORDERLINE):
+        return "A"  # kept = iguana
     if pre.endswith(SUFFIX_GT_ONLY) or pre.endswith(SUFFIX_MATCHED):
         return "kept_unchanged"
     return "kept_unchanged"
