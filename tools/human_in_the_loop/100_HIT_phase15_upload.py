@@ -151,18 +151,18 @@ def _build_fiftyone_keypoints(
             # (fo.Keypoint's `confidence` field expects a list-per-point,
             # not a scalar, and the score isn't load-bearing for the
             # human review).
-            tags = []
-            if label.id:
-                # Carry label_id through CVAT in tags so the download step
-                # can diff pre vs post by id.
-                tags.append(f"id:{label.id}")
-            keypoints.append(
-                fo.Keypoint(
-                    label=label.class_name,
-                    points=[(nx, ny)],
-                    tags=tags if tags else None,
-                )
+            kp = fo.Keypoint(
+                label=label.class_name,
+                points=[(nx, ny)],
             )
+            # Store the Hasty label id as a custom field on the fo.Keypoint.
+            # fiftyone allows arbitrary attributes on embedded docs and
+            # preserves them across the CVAT round trip — the download step
+            # reads `getattr(kp, "hasty_id", None)` to recover the original
+            # label.id. This makes id-based pre <-> post matching reliable.
+            if label.id:
+                kp["hasty_id"] = str(label.id)
+            keypoints.append(kp)
     return fo.Keypoints(keypoints=keypoints)
 
 
@@ -364,7 +364,10 @@ def phase15_cvat_upload(
         label_field="detection",
         label_type="keypoints",
         classes=provenance_classes,
-        attributes=["score"],
+        # Declare hasty_id as a CVAT attribute so it round-trips with the
+        # label even if the reviewer relocates it. The "score" field is
+        # historical; not load-bearing for the diff.
+        attributes=["hasty_id", "score"],
         task_size=50,
         launch_editor=True,
         organization=CVAT_ORGANIZATION,

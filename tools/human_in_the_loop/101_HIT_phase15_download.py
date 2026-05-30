@@ -225,8 +225,19 @@ def _hit_cvat_download_whole_tile(
                 hasty_kp = Keypoint(
                     x=x, y=y, norder=0, keypoint_class_id=keypoint_class_id
                 )
+                # Recover the original Hasty label.id round-tripped via
+                # the kp["hasty_id"] custom attribute set at upload time
+                # (see 100_HIT_phase15_upload.py). If absent — e.g. a
+                # reviewer drew a brand-new label — fall back to a fresh
+                # uuid; downstream matching will detect it as new via the
+                # position-fallback pass.
+                hasty_id = (
+                    getattr(kp, "hasty_id", None)
+                    or (kp.attributes.get("hasty_id") if hasattr(kp, "attributes") and kp.attributes else None)
+                    or str(_uuid.uuid4())
+                )
                 labels.append(ImageLabel(
-                    id=str(_uuid.uuid4()),
+                    id=str(hasty_id),
                     class_name=kp.label,
                     keypoints=[hasty_kp],
                     attributes={"cvat": "downloaded"},
@@ -356,23 +367,51 @@ def _greedy_position_match(
     post_labels: list[ImageLabel],
     same_label_radius: float = 50.0,
 ) -> tuple[list[tuple[int, int, float]], list[int], list[int]]:
-    """Match pre to post labels within an image by position, greedy nearest.
+    """Hybrid pre <-> post matching: id-first, position-fallback.
+
+    Pass 1: match labels where ``pre.id == post.id``. From iteration 1
+    onwards the upload stores the Hasty label.id as a CVAT attribute
+    ``hasty_id`` that round-trips through fiftyone, so kept labels keep
+    their identity even if relocated arbitrarily far.
+
+    Pass 2: greedy nearest-neighbour position match on the remaining
+    labels within ``same_label_radius`` px. Catches labels that lost
+    their hasty_id (legacy iteration-0 data, CVAT quirks, etc.) and
+    keeps the diff working without the id round trip.
 
     Returns (matched, unmatched_pre, unmatched_post). matched is
-    [(pre_idx, post_idx, distance), ...] for pairs within same_label_radius.
+    [(pre_idx, post_idx, distance), ...].
     """
-    pre_xy = [_keypoint_xy(l) for l in pre_labels]
-    post_xy = [_keypoint_xy(l) for l in post_labels]
     used_pre: set[int] = set()
     used_post: set[int] = set()
     matched: list[tuple[int, int, float]] = []
-    # Sort all candidate pairs by distance, greedy-take.
+
+    pre_xy = [_keypoint_xy(l) for l in pre_labels]
+    post_xy = [_keypoint_xy(l) for l in post_labels]
+
+    # --- Pass 1: id-based ---
+    post_by_id = {l.id: j for j, l in enumerate(post_labels) if l.id}
+    for i, pre in enumerate(pre_labels):
+        if not pre.id or pre.id not in post_by_id:
+            continue
+        j = post_by_id[pre.id]
+        if j in used_post:
+            continue
+        px, py = pre_xy[i]
+        qx, qy = post_xy[j]
+        d = (math.hypot(px - qx, py - qy)
+             if None not in (px, py, qx, qy) else 0.0)
+        used_pre.add(i)
+        used_post.add(j)
+        matched.append((i, j, d))
+
+    # --- Pass 2: position fallback on remaining ---
     candidates: list[tuple[float, int, int]] = []
     for i, (px, py) in enumerate(pre_xy):
-        if px is None:
+        if i in used_pre or px is None:
             continue
         for j, (qx, qy) in enumerate(post_xy):
-            if qx is None:
+            if j in used_post or qx is None:
                 continue
             d = math.hypot(px - qx, py - qy)
             if d <= same_label_radius:
@@ -384,6 +423,7 @@ def _greedy_position_match(
         used_pre.add(i)
         used_post.add(j)
         matched.append((i, j, d))
+
     unmatched_pre = [i for i in range(len(pre_labels)) if i not in used_pre]
     unmatched_post = [j for j in range(len(post_labels)) if j not in used_post]
     return matched, unmatched_pre, unmatched_post
