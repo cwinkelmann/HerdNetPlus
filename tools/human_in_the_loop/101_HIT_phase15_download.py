@@ -64,13 +64,208 @@ from com.biospheredata.types.HastyAnnotationV2 import (  # noqa: E402
     Keypoint,
 )
 
-# Re-use the existing CVAT download path. This wraps cvat2hasty + foDataset2Hasty.
-from scripts.human_in_the_loop.helper import hit_cvat_download  # type: ignore  # noqa: E402
+# scripts.human_in_the_loop.helper lives in the active-learning repo, which
+# isn't pip-installed as a top-level package — add the repo root to
+# sys.path so `from scripts...` resolves.
+_AL_REPO = Path("/home/christian/hnee/active-learning")
+if _AL_REPO.is_dir() and str(_AL_REPO) not in sys.path:
+    sys.path.insert(0, str(_AL_REPO))
+
+# The repo's hit_cvat_download() expects a cropped-tile workflow we don't
+# use (it requires config.hA_prediction_tiled_path + per-crop metadata).
+# We do the equivalent pull manually using the lower-level primitives.
+from active_learning.reconstruct_hasty_annotation_cvat import (  # noqa: E402
+    download_cvat_annotations,
+)
+import os as _os
+import uuid as _uuid
+
+
+_NON_IGUANA_CLASSES = {
+    "not_iguana_but_similar_look",
+    "ugly_stone",
+    "fresh_lava",
+    "trash",
+    "hard_negative",
+}
+
+
+def _is_iguana_class(class_name: str) -> bool:
+    """True if the label class represents an iguana (any of our point classes).
+
+    Anything else (not_iguana_but_similar_look, ugly_stone, …) is treated as
+    a hard-negative promotion.
+    """
+    if not class_name:
+        return True  # default: treat empty/unknown as iguana
+    cn = class_name.lower()
+    if cn in _NON_IGUANA_CLASSES:
+        return False
+    return "iguana" in cn
+
+
+def _completed_image_names(anno_results, dataset_name: str) -> set[str] | None:
+    """Return the set of image filenames whose CVAT task state is 'completed'.
+
+    Uses fiftyone's annotation backend get_status() to query CVAT for each
+    task in the run, then maps task -> samples via frame_id_map. Returns
+    None if status can't be fetched (then we fall back to processing
+    everything — keeps backwards compatibility).
+    """
+    try:
+        import fiftyone as fo
+        ds = fo.load_dataset(dataset_name)
+    except Exception as e:
+        logger.warning(f"can't load fo dataset {dataset_name}: {e}")
+        return None
+    try:
+        status = anno_results.get_status()
+    except Exception as e:
+        logger.warning(f"can't get CVAT task status: {e}")
+        return None
+
+    completed_task_ids: set[int] = set()
+    for label_field, per_task in status.items():
+        for task_id, info in per_task.items():
+            tstatus = info.get("status", "") if isinstance(info, dict) else ""
+            if str(tstatus).lower() in ("completed", "acceptance"):
+                completed_task_ids.add(int(task_id))
+    if not completed_task_ids:
+        logger.warning("No CVAT tasks reported 'completed' — nothing to download.")
+        return set()
+
+    # frame_id_map: {task_id: {frame_id: {"sample_id": ..., "frame_id": ...}}}
+    frame_id_map = getattr(anno_results, "frame_id_map", {}) or {}
+    sample_ids: set[str] = set()
+    for task_id in completed_task_ids:
+        for fd in (frame_id_map.get(task_id, {}) or {}).values():
+            sid = fd.get("sample_id")
+            if sid:
+                sample_ids.add(sid)
+
+    # Look up filenames for those sample ids.
+    completed_filenames: set[str] = set()
+    if sample_ids:
+        view = ds.select(list(sample_ids))
+        for s in view:
+            import os as _os
+            completed_filenames.add(_os.path.basename(s.filepath))
+    logger.info(
+        f"CVAT completion filter: {len(completed_task_ids)} task(s) completed, "
+        f"{len(completed_filenames)} image(s) available for download."
+    )
+    return completed_filenames
+
+
+def _hit_cvat_download_whole_tile(
+    report_config, only_completed: bool = True
+) -> HastyAnnotationV2:
+    """Pull CVAT corrections without the cropped-tile machinery.
+
+    The active-learning foDataset2Hasty() has an UnboundLocalError on the
+    whole-tile keypoint path (uses ``orgininal_image`` before assignment
+    when samples lack hasty_image_id). We do the conversion directly: one
+    fiftyone sample -> one AnnotatedImage, one fo.Keypoint -> one Hasty
+    ImageLabel with a Keypoint at the denormalised pixel position.
+    Downstream uses position-based matching to diff pre vs post, so we
+    don't need to preserve label IDs across the round trip.
+    """
+    hA_pre = HastyAnnotationV2.from_file(report_config.hA_prediction_path)
+    _view, dataset = download_cvat_annotations(dataset_name=report_config.dataset_name)
+
+    # Optional filter: only include samples whose CVAT task is in state
+    # "completed" — lets partial reviews not pollute the master.
+    completed_filenames: set[str] | None = None
+    if only_completed:
+        try:
+            import fiftyone as fo
+            ds = fo.load_dataset(report_config.dataset_name)
+            anno_results = ds.load_annotation_results(report_config.dataset_name)
+            completed_filenames = _completed_image_names(
+                anno_results, report_config.dataset_name
+            )
+        except Exception as e:
+            logger.warning(
+                f"can't determine CVAT task completion (will process all): {e}"
+            )
+
+    pre_by_name = {img.image_name: img for img in hA_pre.images}
+    keypoint_class_id = "body"
+    for schema in (hA_pre.keypoint_schemas or []):
+        for kp_class in (schema.keypoint_classes or []):
+            if "body" in kp_class.keypoint_class_name.lower():
+                keypoint_class_id = kp_class.keypoint_class_id
+                break
+
+    post_images: list[AnnotatedImage] = []
+    for sample in dataset:
+        image_filename = _os.path.basename(sample.filepath)
+        if completed_filenames is not None and image_filename not in completed_filenames:
+            continue  # skip samples whose CVAT task isn't completed
+        width = height = 0
+        if hasattr(sample, "metadata") and sample.metadata is not None:
+            width = sample.metadata.width or 0
+            height = sample.metadata.height or 0
+        if (width <= 0 or height <= 0) and image_filename in pre_by_name:
+            width = pre_by_name[image_filename].width or width
+            height = pre_by_name[image_filename].height or height
+        if width <= 0 or height <= 0:
+            logger.warning(f"no width/height for {image_filename}, skipping")
+            continue
+
+        labels: list[ImageLabel] = []
+        keypoints_field = getattr(sample, "detection", None)
+        if keypoints_field is not None:
+            for kp in (keypoints_field.keypoints or []):
+                if not kp.points:
+                    continue
+                nx, ny = kp.points[0]
+                x = int(round(nx * width))
+                y = int(round(ny * height))
+                hasty_kp = Keypoint(
+                    x=x, y=y, norder=0, keypoint_class_id=keypoint_class_id
+                )
+                labels.append(ImageLabel(
+                    id=str(_uuid.uuid4()),
+                    class_name=kp.label,
+                    keypoints=[hasty_kp],
+                    attributes={"cvat": "downloaded"},
+                ))
+
+        image_id = (pre_by_name[image_filename].image_id
+                    if image_filename in pre_by_name else str(_uuid.uuid4()))
+        dataset_name_for_image = (pre_by_name[image_filename].dataset_name
+                                  if image_filename in pre_by_name else None)
+        post_images.append(AnnotatedImage(
+            image_id=image_id,
+            image_name=image_filename,
+            dataset_name=dataset_name_for_image,
+            ds_image_name=None,
+            width=width,
+            height=height,
+            image_status="DONE",
+            tags=[],
+            image_mode=None,
+            labels=labels,
+        ))
+
+    hA_post = hA_pre.copy(deep=True)
+    hA_post.images = post_images
+    # Restrict pre to the same image set so apply_corrections_to_master
+    # doesn't see "pre had this image, post doesn't" for un-reviewed tiles.
+    filtered_pre: HastyAnnotationV2 | None = None
+    if completed_filenames is not None:
+        filtered_pre = hA_pre.copy(deep=True)
+        filtered_pre.images = [
+            img for img in filtered_pre.images if img.image_name in completed_filenames
+        ]
+    return hA_post, filtered_pre
 
 # Local helper (in this directory).
 sys.path.append(str(Path(__file__).parent))
 from hit_phase15_merge import (
     classify_corrected_label,
+    is_iguana_class,
     SUFFIX_GT_ONLY,
     SUFFIX_PRED_ONLY,
     SUFFIX_MATCHED,
@@ -85,8 +280,10 @@ EDIT_LOG_COLUMNS = [
     "image",
     "site",
     "label_id",
-    "class_name",
-    "category",  # A / B / C / D / E / kept_unchanged
+    "pre_class_name",     # what the reviewer saw on the label at upload
+    "post_class_name",    # what came back from CVAT (may be different if reviewer re-classed)
+    "category",           # A / B / C / D / E / H / kept_unchanged
+    "fate",               # human-readable: kept_as_iguana / false_positive / hard_negative / ...
     "x_old", "y_old",
     "x_new", "y_new",
     "score",
@@ -131,7 +328,65 @@ class CategoryCounts:
     C: int = 0
     D: int = 0
     E: int = 0
+    H: int = 0  # hard-negative promotion
     kept_unchanged: int = 0
+
+
+def _bump(counts: "CategoryCounts", category: str) -> None:
+    """Increment the counter for category — falls back to kept_unchanged."""
+    attr = category if category in ("A", "B", "C", "D", "E", "H") else "kept_unchanged"
+    setattr(counts, attr, getattr(counts, attr) + 1)
+
+
+# Map kept-pre-label categories to a per-pre-label "fate" recorded in the
+# edit log so an analyst can later filter on these directly.
+_CATEGORY_TO_FATE = {
+    "A": "kept_as_iguana",       # pred_only kept as iguana — promoted to GT
+    "B": "false_gt_removed",      # gt/matched deleted — GT was wrong
+    "C": "relocated",              # same label moved
+    "D": "kept_borderline",       # borderline kept — needs second opinion
+    "E": "false_positive",        # pred_only deleted — model was wrong
+    "H": "hard_negative",         # pred_only kept as non-iguana — promoted to negatives
+    "kept_unchanged": "kept_unchanged",
+}
+
+
+def _greedy_position_match(
+    pre_labels: list[ImageLabel],
+    post_labels: list[ImageLabel],
+    same_label_radius: float = 50.0,
+) -> tuple[list[tuple[int, int, float]], list[int], list[int]]:
+    """Match pre to post labels within an image by position, greedy nearest.
+
+    Returns (matched, unmatched_pre, unmatched_post). matched is
+    [(pre_idx, post_idx, distance), ...] for pairs within same_label_radius.
+    """
+    pre_xy = [_keypoint_xy(l) for l in pre_labels]
+    post_xy = [_keypoint_xy(l) for l in post_labels]
+    used_pre: set[int] = set()
+    used_post: set[int] = set()
+    matched: list[tuple[int, int, float]] = []
+    # Sort all candidate pairs by distance, greedy-take.
+    candidates: list[tuple[float, int, int]] = []
+    for i, (px, py) in enumerate(pre_xy):
+        if px is None:
+            continue
+        for j, (qx, qy) in enumerate(post_xy):
+            if qx is None:
+                continue
+            d = math.hypot(px - qx, py - qy)
+            if d <= same_label_radius:
+                candidates.append((d, i, j))
+    candidates.sort()
+    for d, i, j in candidates:
+        if i in used_pre or j in used_post:
+            continue
+        used_pre.add(i)
+        used_post.add(j)
+        matched.append((i, j, d))
+    unmatched_pre = [i for i in range(len(pre_labels)) if i not in used_pre]
+    unmatched_post = [j for j in range(len(post_labels)) if j not in used_post]
+    return matched, unmatched_pre, unmatched_post
 
 
 def apply_corrections_to_master(
@@ -140,104 +395,154 @@ def apply_corrections_to_master(
     hA_master: HastyAnnotationV2,
     iteration_id: str,
     edit_log_path: Path,
+    tile_to_master_image: "dict[str, AnnotatedImage] | None" = None,
 ) -> tuple[HastyAnnotationV2, CategoryCounts]:
     """Compute deltas between pre and post and apply to the master Hasty.
+
+    Uses POSITION-BASED matching, not label-id matching: CVAT/foDataset2Hasty
+    assigns fresh UUIDs to every label on download, so the pre-correction
+    label.id doesn't survive the round trip. Instead we Hungarian-match
+    pre to post per image by keypoint position within a 50 px radius.
+    Pairs in radius → kept (possibly moved). Unpaired pre → deleted.
+    Unpaired post → newly drawn.
 
     hA_pre: the intermediate Hasty we uploaded (with provenance class names).
     hA_post: what came back from CVAT after correction.
     hA_master: the production GT to update. We modify a deep copy.
     """
-    pre_index = _index_by_id(hA_pre)
-    post_index = _index_by_id(hA_post)
-
-    pre_ids = set(pre_index.keys())
-    post_ids = set(post_index.keys())
-    deleted_ids = pre_ids - post_ids
-    surviving_ids = pre_ids & post_ids
-    new_ids = post_ids - pre_ids  # reviewer drew a brand-new label not in pre
+    pre_by_image: dict[str, list[ImageLabel]] = {
+        img.image_name: list(img.labels) for img in hA_pre.images
+    }
+    post_by_image: dict[str, list[ImageLabel]] = {
+        img.image_name: list(img.labels) for img in hA_post.images
+    }
 
     hA_master = copy.deepcopy(hA_master)
-    master_image_by_name = {img.image_name: img for img in hA_master.images}
+    if tile_to_master_image is None:
+        # Fallback: lookup by image_name only (works if tile_name == master image_name).
+        master_image_by_name = {img.image_name: img for img in hA_master.images}
+    else:
+        # Use the upload's tile -> master mapping so edits route to the right
+        # Hasty record even when names collide across datasets.
+        master_image_by_name = dict(tile_to_master_image)
 
     counts = CategoryCounts()
     edit_log_rows: list[dict] = []
 
-    # ---- Pre-existing labels: deleted or kept (possibly moved) ----
-    for label_id in pre_ids:
-        pre_label = pre_index[label_id]
-        pre_xy = _keypoint_xy(pre_label)
-        # Find which image this label belongs to (we have to scan hA_pre).
-        image_name = next(
-            (img.image_name for img in hA_pre.images if any(l.id == label_id for l in img.labels)),
-            None,
-        )
-        site = _site_of(image_name) if image_name else "UNKNOWN"
+    all_image_names = set(pre_by_image) | set(post_by_image)
+    for image_name in sorted(all_image_names):
+        pre_labels = pre_by_image.get(image_name, [])
+        post_labels = post_by_image.get(image_name, [])
+        site = _site_of(image_name)
 
-        if label_id in deleted_ids:
-            category = classify_corrected_label(pre_label.class_name, was_moved=False, was_deleted=True)
-            x_new, y_new = None, None
-        else:
-            post_label = post_index[label_id]
+        matched, unmatched_pre, unmatched_post = _greedy_position_match(
+            pre_labels, post_labels, same_label_radius=50.0
+        )
+
+        # KEPT (matched): apply category based on pre's provenance suffix
+        # and whether the position moved >1 px and whether the class changed.
+        for pre_idx, post_idx, distance in matched:
+            pre_label = pre_labels[pre_idx]
+            post_label = post_labels[post_idx]
+            pre_xy = _keypoint_xy(pre_label)
             post_xy = _keypoint_xy(post_label)
-            was_moved = _moved(pre_xy, post_xy)
-            category = classify_corrected_label(post_label.class_name, was_moved=was_moved, was_deleted=False)
-            x_new, y_new = post_xy
+            was_moved = distance > 1.0
+            category = classify_corrected_label(
+                pre_class_name=pre_label.class_name,
+                post_class_name=post_label.class_name,
+                was_moved=was_moved,
+                was_deleted=False,
+            )
 
-        setattr(counts, category if category in ("A","B","C","D","E") else "kept_unchanged",
-                getattr(counts, category if category in ("A","B","C","D","E") else "kept_unchanged") + 1)
+            score = (pre_label.attributes or {}).get("score") if pre_label.attributes else None
+            edit_log_rows.append({
+                "timestamp": datetime.utcnow().isoformat(),
+                "iteration_id": iteration_id,
+                "image": image_name,
+                "site": site,
+                "label_id": pre_label.id,
+                "pre_class_name": pre_label.class_name,
+                "post_class_name": post_label.class_name,
+                "category": category,
+                "fate": _CATEGORY_TO_FATE.get(category, category),
+                "x_old": pre_xy[0], "y_old": pre_xy[1],
+                "x_new": post_xy[0], "y_new": post_xy[1],
+                "score": score,
+                "notes": "",
+            })
+            _bump(counts, category)
+            if image_name not in master_image_by_name:
+                continue
+            master_img = master_image_by_name[image_name]
+            if category == "C":
+                _relocate_keypoint_near(master_img, pre_xy, post_xy, radius=10)
+            elif category == "A":
+                _add_keypoint(master_img, post_xy, class_name=CANONICAL_CLASS_NAME)
+            elif category == "H":
+                # Hard-negative promotion: add label to master under the
+                # non-iguana class the reviewer chose. Future training sees
+                # an explicit negative at this position.
+                _add_keypoint(master_img, post_xy, class_name=post_label.class_name)
 
-        score = (pre_label.attributes or {}).get("score") if pre_label.attributes else None
-        edit_log_rows.append({
-            "timestamp": datetime.utcnow().isoformat(),
-            "iteration_id": iteration_id,
-            "image": image_name,
-            "site": site,
-            "label_id": label_id,
-            "class_name": pre_label.class_name,
-            "category": category,
-            "x_old": pre_xy[0], "y_old": pre_xy[1],
-            "x_new": x_new, "y_new": y_new,
-            "score": score,
-            "notes": "",
-        })
+        # DELETED (pre with no post match): category B / E / D based on suffix.
+        for i in unmatched_pre:
+            pre_label = pre_labels[i]
+            pre_xy = _keypoint_xy(pre_label)
+            category = classify_corrected_label(
+                pre_class_name=pre_label.class_name,
+                post_class_name=None,
+                was_moved=False,
+                was_deleted=True,
+            )
+            score = (pre_label.attributes or {}).get("score") if pre_label.attributes else None
+            edit_log_rows.append({
+                "timestamp": datetime.utcnow().isoformat(),
+                "iteration_id": iteration_id,
+                "image": image_name,
+                "site": site,
+                "label_id": pre_label.id,
+                "pre_class_name": pre_label.class_name,
+                "post_class_name": None,
+                "category": category,
+                "fate": _CATEGORY_TO_FATE.get(category, category),
+                "x_old": pre_xy[0], "y_old": pre_xy[1],
+                "x_new": None, "y_new": None,
+                "score": score,
+                "notes": "deleted_in_cvat",
+            })
+            _bump(counts, category)
+            if image_name in master_image_by_name and category == "B":
+                _remove_keypoint_near(master_image_by_name[image_name], pre_xy, radius=10)
 
-        # Apply to master.
-        if image_name is None or image_name not in master_image_by_name:
-            continue
-        master_img = master_image_by_name[image_name]
-
-        if category == "B":  # remove from GT
-            _remove_keypoint_near(master_img, pre_xy, radius=10)
-        elif category == "C":  # relocate
-            _relocate_keypoint_near(master_img, pre_xy, (x_new, y_new), radius=10)
-        elif category == "A":  # missed iguana — add to master (pre_label was pred_only)
-            _add_keypoint(master_img, (x_new, y_new), class_name=CANONICAL_CLASS_NAME)
-
-    # ---- Brand-new labels the reviewer drew that weren't in the upload ----
-    for label_id in new_ids:
-        post_label = post_index[label_id]
-        x, y = _keypoint_xy(post_label)
-        image_name = next(
-            (img.image_name for img in hA_post.images if any(l.id == label_id for l in img.labels)),
-            None,
-        )
-        site = _site_of(image_name) if image_name else "UNKNOWN"
-        edit_log_rows.append({
-            "timestamp": datetime.utcnow().isoformat(),
-            "iteration_id": iteration_id,
-            "image": image_name,
-            "site": site,
-            "label_id": label_id,
-            "class_name": post_label.class_name,
-            "category": "A",  # newly drawn iguana == missed annotation
-            "x_old": None, "y_old": None,
-            "x_new": x, "y_new": y,
-            "score": None,
-            "notes": "newly_drawn",
-        })
-        counts.A += 1
-        if image_name and image_name in master_image_by_name:
-            _add_keypoint(master_image_by_name[image_name], (x, y), class_name=CANONICAL_CLASS_NAME)
+        # NEWLY DRAWN (post with no pre match). A or H based on class.
+        for j in unmatched_post:
+            post_label = post_labels[j]
+            post_xy = _keypoint_xy(post_label)
+            is_iguana = is_iguana_class(post_label.class_name)
+            category = "A" if is_iguana else "H"
+            edit_log_rows.append({
+                "timestamp": datetime.utcnow().isoformat(),
+                "iteration_id": iteration_id,
+                "image": image_name,
+                "site": site,
+                "label_id": post_label.id,
+                "pre_class_name": None,
+                "post_class_name": post_label.class_name,
+                "category": category,
+                "fate": _CATEGORY_TO_FATE.get(category, category),
+                "x_old": None, "y_old": None,
+                "x_new": post_xy[0], "y_new": post_xy[1],
+                "score": None,
+                "notes": "newly_drawn",
+            })
+            _bump(counts, category)
+            if image_name in master_image_by_name:
+                target_class = (
+                    CANONICAL_CLASS_NAME if is_iguana else post_label.class_name
+                )
+                _add_keypoint(
+                    master_image_by_name[image_name], post_xy, class_name=target_class
+                )
 
     # ---- Append edit log ----
     edit_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -321,35 +626,74 @@ def phase15_cvat_download_and_update(
     iteration_id = iteration_id or report_config.analysis_date
 
     logger.info(f"Pulling reviewed annotations from CVAT for dataset {report_config.dataset_name}")
-    hA_post = hit_cvat_download(report_path)
+    hA_post, hA_pre_filtered = _hit_cvat_download_whole_tile(report_config, only_completed=True)
 
-    # Pre-correction intermediate Hasty (the file we uploaded).
-    logger.info(f"Loading pre-correction Hasty: {report_config.hA_prediction_path}")
-    hA_pre = HastyAnnotationV2.from_file(report_config.hA_prediction_path)
+    # Pre-correction intermediate Hasty (the file we uploaded). When CVAT
+    # task-completion filtering was applied, the filter returned a Hasty
+    # restricted to only the completed images; use it instead of the file.
+    if hA_pre_filtered is not None:
+        hA_pre = hA_pre_filtered
+        logger.info(
+            f"Using completion-filtered pre-Hasty: {len(hA_pre.images)} images "
+            f"(unreviewed images are not in the diff)."
+        )
+    else:
+        logger.info(f"Loading pre-correction Hasty: {report_config.hA_prediction_path}")
+        hA_pre = HastyAnnotationV2.from_file(report_config.hA_prediction_path)
 
     logger.info(f"Loading master Hasty to update: {master_hasty_path}")
     hA_master = HastyAnnotationV2.from_file(master_hasty_path)
 
-    # Sanity-check: every image referenced by the pre-correction Hasty must
-    # exist in the master Hasty. If not, the master would silently miss
-    # edits. The upload step already validated this, but we re-check here
-    # because the master may have been edited / reloaded in the meantime.
-    master_image_names = {img.image_name for img in hA_master.images}
-    missing_from_master = sorted(
-        {img.image_name for img in hA_pre.images} - master_image_names
-    )
-    if missing_from_master:
-        logger.error(
-            f"{len(missing_from_master)} pre-correction images are NOT in the "
-            f"master Hasty — edits for these would be silently lost."
-        )
-        for m in missing_from_master[:10]:
-            logger.error(f"  missing: {m}")
+    # Load the tile -> (hasty_dataset, hasty_image_name) mapping written
+    # by the upload step. This is the only reliable way to route a tile's
+    # corrections to the right master Hasty image (the tile uses a
+    # <dataset>___<filename> prefixed name while Hasty stores bare names).
+    import json as _json
+    report_dir = Path(report_path).parent if Path(report_path).is_file() else Path(report_path)
+    mapping_paths = list(report_dir.glob("*_image_to_dataset.json"))
+    if not mapping_paths:
         raise RuntimeError(
-            "Master Hasty does not contain all images referenced in the upload. "
-            "Inspect the master at "
+            f"No *_image_to_dataset.json mapping file in {report_dir}. The "
+            f"upload step writes this; without it we can't route edits to "
+            f"the master."
+        )
+    mapping = _json.loads(mapping_paths[0].read_text())
+    logger.info(f"Loaded tile->Hasty mapping from {mapping_paths[0]} "
+                f"({len(mapping)} entries)")
+
+    # Resolve tile_name -> master AnnotatedImage via (dataset, hasty_name).
+    master_by_dataset_and_name: dict[tuple[str, str], AnnotatedImage] = {}
+    for img in hA_master.images:
+        if img.image_name and img.dataset_name:
+            master_by_dataset_and_name.setdefault(
+                (img.dataset_name, img.image_name), img
+            )
+    tile_to_master_image: dict[str, AnnotatedImage] = {}
+    unmatched_tiles: list[str] = []
+    for tile_name, route in mapping.items():
+        key = (route["dataset_name"], route["hasty_image_name"])
+        master_img = master_by_dataset_and_name.get(key)
+        if master_img is None:
+            unmatched_tiles.append(tile_name)
+        else:
+            tile_to_master_image[tile_name] = master_img
+
+    if unmatched_tiles:
+        logger.error(
+            f"{len(unmatched_tiles)} mapping entries could not be resolved "
+            f"to a master Hasty image — edits for these would be silently "
+            f"lost. Has the master Hasty changed since upload?"
+        )
+        for t in unmatched_tiles[:10]:
+            logger.error(f"  unresolved: {t}")
+        raise RuntimeError(
+            "Master Hasty has lost images referenced in the upload. Inspect "
             f"{master_hasty_path} and confirm the right file is being updated."
         )
+    logger.info(
+        f"Resolved {len(tile_to_master_image)} of {len(mapping)} tile names "
+        f"to master Hasty records."
+    )
 
     hA_master_updated, counts = apply_corrections_to_master(
         hA_pre=hA_pre,
@@ -357,6 +701,7 @@ def phase15_cvat_download_and_update(
         hA_master=hA_master,
         iteration_id=iteration_id,
         edit_log_path=edit_log_path,
+        tile_to_master_image=tile_to_master_image,
     )
 
     output_master_hasty_path.parent.mkdir(parents=True, exist_ok=True)
@@ -364,11 +709,12 @@ def phase15_cvat_download_and_update(
     logger.info(f"Wrote updated master Hasty: {output_master_hasty_path}")
     logger.info(
         f"Edits for iteration {iteration_id}: "
-        f"A={counts.A} (missed iguanas added), "
+        f"A={counts.A} (kept as iguana / promoted to GT), "
         f"B={counts.B} (false GT removed), "
         f"C={counts.C} (relocated), "
-        f"D={counts.D} (borderline — second opinion needed), "
-        f"E={counts.E} (confirmed FPs), "
+        f"D={counts.D} (borderline — second opinion), "
+        f"E={counts.E} (confirmed FPs — no master change), "
+        f"H={counts.H} (hard-negative promoted), "
         f"kept_unchanged={counts.kept_unchanged}"
     )
     logger.info(f"Edit log appended at: {edit_log_path}")

@@ -63,6 +63,33 @@ PROVENANCE_COLORS = {
 # The download step collapses every provenance variant back to this.
 CANONICAL_CLASS_NAME = "iguana_point"
 
+# Non-iguana classes in the Hasty schema. If a CVAT reviewer changes a
+# pred_only/borderline label's class to one of these (or any non-iguana
+# class), the download step treats it as a hard-negative promotion: the
+# label is added to the master Hasty under that class so future training
+# sees it as an explicit negative example at that position.
+NON_IGUANA_CLASSES = {
+    "not_iguana_but_similar_look",
+    "ugly_stone",
+    "fresh_lava",
+    "trash",
+    "hard_negative",
+    "crab",
+    "turtle",
+    "seal",
+    "bird",
+}
+
+
+def is_iguana_class(class_name: str) -> bool:
+    """True if the label class represents an iguana (any iguana_point* variant)."""
+    if not class_name:
+        return True
+    cn = class_name.lower()
+    if cn in NON_IGUANA_CLASSES:
+        return False
+    return "iguana" in cn
+
 
 @dataclass
 class MergeResult:
@@ -361,34 +388,42 @@ def _label_classes_with_provenance(existing, base_class_name: str):
     return list(existing) + new_entries
 
 
-def classify_corrected_label(class_name: str, was_moved: bool, was_deleted: bool) -> str:
-    """Map a corrected CVAT label back to a Phase-15 edit category (A..E).
+def classify_corrected_label(
+    pre_class_name: str,
+    post_class_name: str | None,
+    was_moved: bool,
+    was_deleted: bool,
+) -> str:
+    """Map a (pre, post) label pair back to a Phase-15 edit category.
 
-    Categories from docs/phase15_annotation_cleanup_loop.md:
-      A: missed iguana    — pred_only kept by reviewer  -> add to GT
-      B: false GT          — gt_only deleted by reviewer -> remove from GT
-      C: relocation       — any provenance moved >0 px  -> update (x, y)
-      D: borderline       — borderline kept              -> flag for second opinion
-      E: confirmed FP     — pred_only deleted            -> log failure mode
+    Categories:
+      A: missed iguana    — pred_only kept as an iguana class -> add to master as iguana_point
+      B: false GT         — gt_only/matched deleted -> remove from master
+      C: relocation       — same label moved >1 px (and still iguana)
+      D: borderline       — borderline kept as iguana -> flag for second opinion
+      E: confirmed FP     — pred_only/borderline deleted
+      H: hard_negative    — pred_only/borderline KEPT but reviewer changed
+                            the class to a non-iguana (e.g. not_iguana_but_similar_look)
+                            -> add to master under that non-iguana class
     """
-    name = class_name.lower()
+    pre = pre_class_name.lower() if pre_class_name else ""
+
     if was_deleted:
-        if name.endswith(SUFFIX_GT_ONLY):
-            return "B"
-        if name.endswith(SUFFIX_PRED_ONLY):
-            return "E"
-        if name.endswith(SUFFIX_MATCHED):
-            return "B"  # matched but deleted = reviewer says neither GT nor pred is right
-        if name.endswith(SUFFIX_BORDERLINE):
-            return "E"
-        return "E"
-    # kept (not deleted)
+        if pre.endswith(SUFFIX_GT_ONLY) or pre.endswith(SUFFIX_MATCHED):
+            return "B"  # deleted GT-anchored label
+        return "E"  # pred_only or borderline deleted
+
+    # Kept (not deleted). Detect hard-negative promotion via class change.
+    if post_class_name and not is_iguana_class(post_class_name):
+        return "H"
+
     if was_moved:
         return "C"
-    if name.endswith(SUFFIX_PRED_ONLY):
+    if pre.endswith(SUFFIX_PRED_ONLY):
         return "A"
-    if name.endswith(SUFFIX_BORDERLINE):
+    if pre.endswith(SUFFIX_BORDERLINE):
         return "D"
-    if name.endswith(SUFFIX_GT_ONLY) or name.endswith(SUFFIX_MATCHED):
-        return "C" if was_moved else "kept_unchanged"
+    if pre.endswith(SUFFIX_GT_ONLY) or pre.endswith(SUFFIX_MATCHED):
+        return "kept_unchanged"
+    return "kept_unchanged"
     return "kept_unchanged"

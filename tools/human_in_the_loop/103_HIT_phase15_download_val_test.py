@@ -25,6 +25,7 @@ HASTY_MASTER = Path(
 )
 STAGE_ROOT = Path("/home/christian/hnee/HerdNet/output/phase15_iter0_val_test")
 REPORT_DIR = STAGE_ROOT / "report"
+REPORT_JSON = REPORT_DIR / "report.json"
 
 OUTPUT_HASTY = HASTY_MASTER.parent / f"{HASTY_MASTER.stem}_phase15_iter0_corrected.json"
 EDIT_LOG = Path("/home/christian/hnee/HerdNet/data/phase15_edit_log.csv")
@@ -33,7 +34,7 @@ ITERATION_ID = "phase15_iter0_val_test"
 
 if __name__ == "__main__":
     counts = phase15_cvat_download_and_update(
-        report_path=REPORT_DIR,
+        report_path=REPORT_JSON,
         master_hasty_path=HASTY_MASTER,
         output_master_hasty_path=OUTPUT_HASTY,
         edit_log_path=EDIT_LOG,
@@ -41,11 +42,12 @@ if __name__ == "__main__":
     )
     print()
     print(f"Iteration {ITERATION_ID} complete.")
-    print(f"  A={counts.A} (missed iguanas added)")
+    print(f"  A={counts.A} (kept as iguana / promoted to GT)")
     print(f"  B={counts.B} (false GT removed)")
     print(f"  C={counts.C} (relocated)")
     print(f"  D={counts.D} (borderline — flag for second opinion)")
-    print(f"  E={counts.E} (confirmed FPs)")
+    print(f"  E={counts.E} (confirmed FPs — no master change)")
+    print(f"  H={counts.H} (hard-negative promoted: kept as non-iguana class)")
     print(f"  kept_unchanged={counts.kept_unchanged}")
     print()
     print(f"Updated Hasty:  {OUTPUT_HASTY}")
