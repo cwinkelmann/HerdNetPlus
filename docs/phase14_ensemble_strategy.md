@@ -210,7 +210,9 @@ Phase 6 ran flip-TTA and showed +0.01–0.02 F1. Phase 14 doesn't use it. Add it
 
 ### Annotation-budget rebalance toward hard negatives
 
-Phase 13 §1 (logarithmic data scaling) + Phase 14 H3 (hard-negative mining beats bulk frames) jointly suggest: stop bulk-labelling new frames, redirect that effort to FP-prone regions identified by the ensemble. Phase 14 Stage D is a single-round test of this. Phase 15 would be a structured **annotation queue** (top-K uncertain detections per week → human verifies → retrain monthly) rather than ad-hoc rounds.
+Phase 13 §1 (logarithmic data scaling) + Phase 14 H3 (hard-negative mining beats bulk frames) jointly suggest: stop bulk-labelling new frames, redirect that effort to FP-prone regions identified by the ensemble. Phase 14 Stage D is a single-round test of this.
+
+**Promoted out of this candidate list** — the structured annotation queue is now its own planning doc: [`docs/phase15_annotation_cleanup_loop.md`](phase15_annotation_cleanup_loop.md). The Phase-13 error analysis ([`benchmarks/phase13_error_analysis.md`](benchmarks/phase13_error_analysis.md)) made the case load-bearing: 93 % of "FPs" on val are annotator-missed iguanas, and a 1-hour QA pass plausibly closes the F1 ≥ 0.94 gate that ~36 GPU-hours of Phase 14 ensembling couldn't reach.
 
 ### Calibration / Platt scaling
 
