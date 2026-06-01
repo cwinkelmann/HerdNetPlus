@@ -52,16 +52,19 @@ def hasty_to_herdnet_csv(
         for label in img.labels:
             if label.class_name not in IGUANA_CLASSES:
                 continue
-            for kp in (label.keypoints or []):
+            # Phase 15 explicitly operates on the keypoint annotations only;
+            # the master also contains ~20k `iguana` bbox labels that we
+            # leave UNTOUCHED in this round (the reviewer is fixing points,
+            # not boxes). Skip any label without a keypoints array — that
+            # way a box centroid never gets emitted as a point and never
+            # ends up as a green marker that could be accidentally deleted
+            # via CVAT and remove the box from master.
+            if not label.keypoints:
+                continue
+            for kp in label.keypoints:
                 if kp.x is None or kp.y is None:
                     continue
                 keypoints.append((float(kp.x), float(kp.y), label.class_name))
-            # Some Hasty labels store the position only in incenter_centroid
-            # (no explicit keypoints array). Fall back if needed.
-            if not label.keypoints and getattr(label, "incenter_centroid", None) is not None:
-                ic = label.incenter_centroid
-                if getattr(ic, "x", None) is not None and getattr(ic, "y", None) is not None:
-                    keypoints.append((float(ic.x), float(ic.y), label.class_name))
         if keypoints:
             by_dataset_and_name[(img.dataset_name, img.image_name)] = keypoints
 

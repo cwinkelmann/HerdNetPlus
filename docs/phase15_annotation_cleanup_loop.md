@@ -124,6 +124,30 @@ Before launching iteration 1, do the val-only QA pass that's already prepped:
 
 This iteration-0 step is high-leverage and zero new compute. It establishes the baseline rubric, gives a calibrated estimate of the gap rate (which feeds H1), and produces the *post-QA* val number we'll use to validate the loop is working as intended in subsequent iterations.
 
+### Point ↔ box reconciliation (deferred, Phase 15.5 or 17)
+
+The Hasty master carries two parallel iguana annotation tracks:
+- **`iguana_point` keypoints** (~72k labels): the modern HerdNet-format track this phase operates on.
+- **`iguana` bboxes** (~21k labels): the legacy track, drawn during earlier annotation rounds before HerdNet became point-only.
+
+The Phase-15 cleanup pipeline as of 2026-06-01 explicitly **leaves bboxes
+untouched**: `hasty_to_herdnet_csv.py` skips any label without a keypoints
+array, and the download's apply helpers refuse to touch box-only labels.
+This keeps the box track as an audit trail while the point track gets
+cleaned.
+
+After the point cleanup loop converges (~iter-10), a single reconciliation
+pass should ensure 1:1 correspondence:
+- Every `iguana` bbox in the master should have a matching `iguana_point`
+  within ~50 px of its centroid (and vice-versa).
+- Mismatches surface as either (a) a box with no point — add the point at
+  the centroid, or (b) a point with no box — leave as-is or add a synthetic
+  box if downstream consumers need bboxes.
+
+Implementation sketch: a `tools/human_in_the_loop/reconcile_points_and_boxes.py`
+that does the Hungarian match per image, emits a delta report, and lets
+the operator dry-run before applying. Run once, post-Phase-15.
+
 ### TODO checklist
 
 - [ ] **Iteration 0** — review 60 val FP crops; produce post-QA val metrics

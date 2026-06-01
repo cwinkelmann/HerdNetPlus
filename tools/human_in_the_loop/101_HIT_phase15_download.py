@@ -462,9 +462,27 @@ def apply_corrections_to_master(
         # Fallback: lookup by image_name only (works if tile_name == master image_name).
         master_image_by_name = {img.image_name: img for img in hA_master.images}
     else:
-        # Use the upload's tile -> master mapping so edits route to the right
-        # Hasty record even when names collide across datasets.
-        master_image_by_name = dict(tile_to_master_image)
+        # CRITICAL: tile_to_master_image was built by the caller against
+        # the *pre-deepcopy* master, so its values point at AnnotatedImage
+        # objects that are now stale. Rebuild the mapping against the
+        # deep-copied master before any mutation. Without this, every
+        # _add_keypoint / _remove_keypoint_near silently mutates dead
+        # references and the saved master is pristine.
+        old_to_key = {
+            id(img): (img.dataset_name, img.image_name)
+            for img in tile_to_master_image.values()
+            if img.dataset_name and img.image_name
+        }
+        new_by_key = {
+            (img.dataset_name, img.image_name): img for img in hA_master.images
+            if img.image_name and img.dataset_name
+        }
+        master_image_by_name = {}
+        for tile_name, old_img in tile_to_master_image.items():
+            key = old_to_key.get(id(old_img))
+            new_img = new_by_key.get(key) if key else None
+            if new_img is not None:
+                master_image_by_name[tile_name] = new_img
 
     counts = CategoryCounts()
     edit_log_rows: list[dict] = []
@@ -607,15 +625,24 @@ def apply_corrections_to_master(
 
 
 def _remove_keypoint_near(image: AnnotatedImage, xy: tuple[float, float], radius: float) -> None:
+    """Remove the first keypoint-bearing label within radius of xy.
+
+    NEVER removes a box-only (bbox-without-keypoints) label — those are
+    the iguana bboxes Phase 15 leaves untouched in this round. A box
+    centroid coinciding with the deletion target would otherwise be
+    catastrophically removed.
+    """
     if xy[0] is None:
         return
     new_labels = []
     removed = 0
     for l in image.labels:
-        lx, ly = _keypoint_xy(l)
-        if lx is None or removed >= 1:
+        if removed >= 1 or not l.keypoints:
             new_labels.append(l); continue
-        if math.hypot(lx - xy[0], ly - xy[1]) <= radius:
+        kp = l.keypoints[0]
+        if kp.x is None or kp.y is None:
+            new_labels.append(l); continue
+        if math.hypot(float(kp.x) - xy[0], float(kp.y) - xy[1]) <= radius:
             removed += 1
             continue
         new_labels.append(l)
@@ -624,16 +651,24 @@ def _remove_keypoint_near(image: AnnotatedImage, xy: tuple[float, float], radius
 
 def _relocate_keypoint_near(image: AnnotatedImage, xy_old: tuple[float, float],
                             xy_new: tuple[float, float], radius: float) -> None:
+    """Relocate the first keypoint-bearing label within radius of xy_old.
+
+    Box-only labels are skipped — moving a CVAT marker that sat on a box
+    centroid should not silently fail to relocate; it would also be wrong
+    to mutate the box. The reviewer's intent in that case is to relocate
+    a *point*, not the box.
+    """
     if xy_old[0] is None or xy_new[0] is None:
         return
     for l in image.labels:
-        lx, ly = _keypoint_xy(l)
-        if lx is None:
+        if not l.keypoints:
             continue
-        if math.hypot(lx - xy_old[0], ly - xy_old[1]) <= radius:
-            if l.keypoints:
-                l.keypoints[0].x = int(round(xy_new[0]))
-                l.keypoints[0].y = int(round(xy_new[1]))
+        kp = l.keypoints[0]
+        if kp.x is None or kp.y is None:
+            continue
+        if math.hypot(float(kp.x) - xy_old[0], float(kp.y) - xy_old[1]) <= radius:
+            kp.x = int(round(xy_new[0]))
+            kp.y = int(round(xy_new[1]))
             return
 
 
