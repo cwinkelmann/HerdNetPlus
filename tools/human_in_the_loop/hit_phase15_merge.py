@@ -212,6 +212,73 @@ def merge_dataset(
     return results
 
 
+def suppress_near_hard_negatives(
+    results: list[MergeResult],
+    hA_master,
+    radius: float,
+) -> tuple[int, int]:
+    """Drop pred_only / borderline candidates that sit on top of an existing
+    non-iguana label in the master Hasty.
+
+    Why this matters: the iter-N download promotes deleted pred_only markers
+    to `not_iguana_but_similar_look` keypoints in master. Without this
+    filter, the model — which hasn't been retrained between iterations —
+    keeps emitting predictions at those same positions, and the next
+    upload's Hungarian merge surfaces them again as red `iguana_point_pred`
+    markers. The reviewer would have to keep deleting the same FPs.
+
+    Non-iguana labels considered (per NON_IGUANA_CLASSES): keypoint position
+    if present, else bbox centroid (read-only — we don't mutate boxes).
+
+    Returns (n_pred_only_dropped, n_borderline_dropped).
+    """
+    from collections import defaultdict
+
+    by_key: dict[tuple[str, str], list[tuple[float, float]]] = defaultdict(list)
+    for img in hA_master.images:
+        if not img.dataset_name or not img.image_name:
+            continue
+        for label in img.labels:
+            if label.class_name not in NON_IGUANA_CLASSES:
+                continue
+            pos: tuple[float, float] | None = None
+            if label.keypoints:
+                kp = label.keypoints[0]
+                if kp.x is not None and kp.y is not None:
+                    pos = (float(kp.x), float(kp.y))
+            elif getattr(label, "incenter_centroid", None) is not None:
+                ic = label.incenter_centroid
+                if getattr(ic, "x", None) is not None and getattr(ic, "y", None) is not None:
+                    pos = (float(ic.x), float(ic.y))
+            if pos is not None:
+                by_key[(img.dataset_name, img.image_name)].append(pos)
+
+    r2 = radius * radius
+    n_pred = 0
+    n_border = 0
+    for r in results:
+        if "___" not in r.image:
+            continue
+        ds, hname = r.image.split("___", 1)
+        positions = by_key.get((ds, hname))
+        if not positions:
+            continue
+
+        def too_close(x, y):
+            for hx, hy in positions:
+                if (x - hx) ** 2 + (y - hy) ** 2 <= r2:
+                    return True
+            return False
+
+        before_p = len(r.pred_only)
+        r.pred_only = [t for t in r.pred_only if not too_close(t[0], t[1])]
+        n_pred += before_p - len(r.pred_only)
+        before_b = len(r.borderline)
+        r.borderline = [t for t in r.borderline if not too_close(t[0], t[1])]
+        n_border += before_b - len(r.borderline)
+    return n_pred, n_border
+
+
 def merge_summary(results: list[MergeResult]) -> dict:
     """Counts useful for the upload log message."""
     total = {"matched": 0, "gt_only": 0, "pred_only": 0, "borderline": 0}

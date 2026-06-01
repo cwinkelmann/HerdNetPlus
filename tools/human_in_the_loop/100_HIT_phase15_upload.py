@@ -225,6 +225,33 @@ def phase15_cvat_upload(
             "No disagreement found between GT and predictions — nothing to review."
         )
 
+    # Suppress pred_only / borderline candidates that sit on top of an
+    # existing non-iguana label in master (= already-confirmed-FP from a
+    # previous iteration). The model hasn't been retrained, so it still
+    # emits predictions at those positions — the merge sees no GT there
+    # (non-iguana classes aren't in herdnet_format.csv) and would surface
+    # them as fresh red markers. We honour the prior decision by dropping
+    # them before the reviewer sees them again.
+    from hit_phase15_merge import suppress_near_hard_negatives  # local import
+    master_for_suppression = HastyAnnotationV2.from_file(
+        config.reference_base_path / config.hasty_reference_annotation_name
+    )
+    n_pred_supp, n_border_supp = suppress_near_hard_negatives(
+        results, master_for_suppression, radius=config.radius
+    )
+    logger.info(
+        f"Hard-negative suppression dropped {n_pred_supp} pred_only "
+        f"+ {n_border_supp} borderline candidates that overlap an existing "
+        f"non-iguana label in master."
+    )
+    post_suppress_stats = merge_summary(results)
+    logger.info(
+        f"After suppression: matched={post_suppress_stats['matched']}, "
+        f"gt_only={post_suppress_stats['gt_only']}, "
+        f"pred_only={post_suppress_stats['pred_only']}, "
+        f"borderline={post_suppress_stats['borderline']}"
+    )
+
     if only_fp_images:
         # Drop images whose only candidates are gt_only / matched / borderline —
         # keep only images that have at least one pred_only point (= apparent
