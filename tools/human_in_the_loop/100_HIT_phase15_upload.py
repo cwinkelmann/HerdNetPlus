@@ -354,11 +354,12 @@ def phase15_cvat_upload(
         f"Launching CVAT task: project={CVAT_PROJECT_NAME!r}, "
         f"organization={CVAT_ORGANIZATION!r}, anno_key={config.dataset_name!r}"
     )
-    # task_size keeps each CVAT task small enough to avoid 504 Gateway
-    # Timeouts on the data upload POST (the public CVAT instance times out
-    # when a single task tries to ingest more than ~150-200 MB of imagery).
-    # All tasks land in the same project (Hasty_Corr), so the reviewer sees
-    # them grouped.
+    # Use segment_size (= job_size in CVAT terminology) so all samples
+    # land in ONE task, partitioned into multiple jobs of 50. Cleaner UX
+    # than task_size=50 (which created ~5 tasks per upload).
+    #
+    # If the single-task data POST times out (the original 504 we hit at
+    # 225 images / ~450 MB), fall back to task_size=150 + segment_size=50.
     dataset.annotate(
         anno_key=config.dataset_name,
         label_field="detection",
@@ -368,7 +369,7 @@ def phase15_cvat_upload(
         # label even if the reviewer relocates it. The "score" field is
         # historical; not load-bearing for the diff.
         attributes=["hasty_id", "score"],
-        task_size=50,
+        segment_size=50,
         launch_editor=True,
         organization=CVAT_ORGANIZATION,
         project_name=CVAT_PROJECT_NAME,
