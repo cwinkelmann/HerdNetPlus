@@ -1,0 +1,69 @@
+# HerdNet active-learning iteration-3 training container.
+#
+# Variant of Dockerfile.train. Bundles the al_v3 split (7,333 train +
+# 3,009 val tiles from the post-phase15-iter1 corrected master) and the
+# Phase-8 b4_seed42 warm-start. The entrypoint runs a recall-tuned
+# training run (validate_on=f5_score, adapt_ts=0.15) sized for an
+# 80 GB GPU (BATCH_SIZE=32, NUM_WORKERS=24).
+#
+# Goal: drive recall on the held-out val toward ~0.9 (current model is
+# at recall 0.86 after 3 epochs at aug_mult=10). Trained on 80 GB this
+# should finish in ~6-10 h vs 20+ h on a 16 GB GPU.
+FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
+
+LABEL maintainer="christian.winkelmann@gmail.com"
+LABEL description="HerdNet active-learning iter-3 training container — recall-tuned, 80 GB sized"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    LC_NUMERIC=C \
+    DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        tini \
+        libgl1 \
+        libglib2.0-0 \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY pyproject.toml /app/
+RUN pip install --upgrade pip setuptools wheel
+
+COPY animaloc /app/animaloc/
+RUN pip install -e ".[tracking]"
+
+COPY configs /app/configs/
+COPY tools   /app/tools/
+
+# Warm-start
+COPY best_models /app/best_models/
+
+# al_v3 dataset (staged by docker/build_al_v3.sh):
+# /app/data/train/Default, /app/data/train/herdnet_format.csv
+# /app/data/val/Default,   /app/data/val/herdnet_format.csv
+COPY data /app/data/
+
+COPY docker/al_v3_entrypoint.sh /app/docker/
+COPY docker/upload_model.py     /app/docker/
+RUN chmod +x /app/docker/al_v3_entrypoint.sh
+
+ENV SEED=42 \
+    WANDB_PROJECT=hn_active_learning \
+    WANDB_FLAG=True \
+    BATCH_SIZE=32 \
+    NUM_WORKERS=24 \
+    AUG_MULT=75 \
+    EPOCHS=30 \
+    LR=6.4e-4 \
+    VALIDATE_ON=f5_score \
+    ADAPT_TS=0.15 \
+    UPLOAD_MODEL=1 \
+    ARTIFACT_NAME=al_v3_best_model \
+    WANDB_RUN=al_v3_b4_seed42_recall_80gb
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/docker/al_v3_entrypoint.sh"]

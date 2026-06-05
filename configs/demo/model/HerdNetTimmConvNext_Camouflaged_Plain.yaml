@@ -1,0 +1,10 @@
+name: 'CamouflageHerdNetConvNeXt'
+from_torchvision: False
+load_from: null
+resume_from: null
+kwargs:
+  pretrained: True
+  use_gabor: False
+  use_edge_enhancement: False
+  use_multi_res: False
+freeze: null

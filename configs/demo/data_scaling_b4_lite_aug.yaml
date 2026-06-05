@@ -1,0 +1,62 @@
+# Active-learning v2 lighter-aug variant — same B4 architecture as
+# data_scaling_b4.yaml but pulling the lighter augmentation pipeline.
+
+defaults:
+  - /losses: herdnet_fmo03
+  - /datasets: data_scaling_lite_aug
+  - /training_settings: evaluator
+  - /model: HerdNetTimmConvNext_Camouflaged_V2
+  - _self_
+
+wandb_flag: True
+seed: 42
+device_name: null
+wandb_project: 'hn_active_learning'
+wandb_entity: 'karisu'
+wandb_run: 'al_v2_b4_seed42_lite_aug'
+wandb_tags: ['active_learning', 'v2', 'b4', 'lite_aug']
+wandb_notes: |
+  Active-learning iter-2 — lighter-aug variant.
+  Same B4 ConvNeXtV2 + warm-start from phase8/b4_seed42.
+  Removes Downscale, shadows, CoarseDropout from train pipeline.
+
+datasets:
+  num_classes: 2
+  class_def:
+    1: 'iguana'
+
+training_settings:
+  lr: 8.0e-05
+  epochs: 10
+  batch_size: 4
+  num_workers: 8
+  warmup_iters: 500
+  valid_freq: 1
+  print_freq: 20
+  auto_lr:
+    mode: 'max'
+    patience: 8
+    threshold: 1e-4
+    threshold_mode: 'rel'
+    cooldown: 5
+    min_lr: 1e-8
+    verbose: True
+  evaluator:
+    kwargs:
+      lmds_kwargs:
+        adapt_ts: 0.3
+  visualiser:
+    down_ratio: 4
+  debug_visualiser: null
+
+model:
+  load_from: null
+  resume_from: null
+  kwargs:
+    pretrained: True
+    down_ratio: 4
+    backbone_size: tiny
+
+hydra:
+  run:
+    dir: ./output/al_v2_b4_lite_aug/${now:%Y-%m-%d}/${now:%H-%M-%S}

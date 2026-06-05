@@ -1,0 +1,8 @@
+name: 'CamouflageHerdNetConvNeXt'
+from_torchvision: False
+load_from: null
+resume_from: null
+kwargs:
+  pretrained: True
+  backbone: efficientvit
+freeze: null

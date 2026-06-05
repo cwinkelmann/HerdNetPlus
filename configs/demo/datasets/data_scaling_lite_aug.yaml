@@ -1,0 +1,140 @@
+# Phase-13 dataset config — LIGHTER augmentation variant for active-learning v2.
+#
+# Removed from the augplus stack:
+#   - Downscale (was risky: small iguanas could lose detail at 0.5x)
+#   - PlasmaShadow + RandomShadow (could occlude dark iguanas on lava)
+#   - CoarseDropout (could mask iguana centroids)
+#
+# Kept: flips, rotations, ShiftScaleRotate, Perspective, GaussianBlur,
+# Sharpen, brightness/contrast/gamma, HSV/RGB shifts, CLAHE, noise.
+
+img_size: [512, 512]
+anno_type: 'point'
+num_classes: 2
+collate_fn: null
+
+class_def:
+  1: 'iguana'
+
+train:
+  name: 'CSVDataset'
+  csv_file: '???'
+  root_dir: '???'
+  sampler: null
+  augmentation_multiplier: 10
+
+  albu_transforms:
+    ObjectAwareRandomCrop:
+      height: 512
+      width: 512
+      min_edge_distance: 0
+      empty_probability: 0.05
+      edge_probability: 0.2
+      edge_zone: 120
+      p: 1.0
+
+    HorizontalFlip:
+      p: 0.5
+    VerticalFlip:
+      p: 0.5
+    RandomRotate90:
+      p: 0.5
+    ShiftScaleRotate:
+      shift_limit: 0.0625
+      scale_limit: 0.15
+      rotate_limit: 45
+      p: 0.5
+    Perspective:
+      scale: 0.05
+      p: 0.2
+
+    OneOf:
+      transforms:
+        GaussianBlur:
+          blur_limit: [3, 7]
+          p: 1.0
+        Sharpen:
+          alpha: [0.2, 0.5]
+          lightness: [0.5, 1.0]
+          p: 1.0
+      p: 0.3
+
+    RandomBrightnessContrast:
+      brightness_limit: 0.2
+      contrast_limit: 0.2
+      p: 0.3
+    RandomGamma:
+      gamma_limit: [80, 120]
+      p: 0.2
+
+    HueSaturationValue:
+      hue_shift_limit: 10
+      sat_shift_limit: 20
+      val_shift_limit: 15
+      p: 0.3
+    RGBShift:
+      r_shift_limit: 10
+      g_shift_limit: 10
+      b_shift_limit: 10
+      p: 0.2
+    CLAHE:
+      clip_limit: 4.0
+      p: 0.2
+
+    SomeOf_noise:
+      transforms:
+        GaussNoise:
+          std_range: [0.02, 0.06]
+          p: 1.0
+        ISONoise:
+          color_shift: [0.01, 0.03]
+          intensity: [0.1, 0.3]
+          p: 1.0
+        ImageCompression:
+          quality_range: [60, 90]
+          p: 1.0
+      n: 1
+      p: 0.2
+
+    Normalize:
+      p: 1.0
+
+  end_transforms:
+    MultiTransformsWrapper:
+      FIDT:
+        num_classes: ${datasets.num_classes}
+        down_ratio: ${model.kwargs.down_ratio}
+        radius: 2
+      PointsToMask:
+        radius: 2
+        num_classes: ${datasets.num_classes}
+        squeeze: true
+        down_ratio: 32
+
+validate:
+  name: 'CSVDataset'
+  csv_file: '???'
+  root_dir: '???'
+
+  albu_transforms:
+    Normalize:
+      p: 1.0
+
+  end_transforms:
+    DownSample:
+      down_ratio: ${model.kwargs.down_ratio}
+      anno_type: ${datasets.anno_type}
+
+test:
+  name: 'CSVDataset'
+  csv_file: '???'
+  root_dir: '???'
+
+  albu_transforms:
+    Normalize:
+      p: 1.0
+
+  end_transforms:
+    DownSample:
+      down_ratio: ${model.kwargs.down_ratio}
+      anno_type: ${datasets.anno_type}

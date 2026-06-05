@@ -1,0 +1,15 @@
+name: 'HerdNetHybrid'
+from_torchvision: False
+load_from: null
+resume_from: null
+kwargs:
+  backbone_size: 'tiny'
+  pretrained: True
+  down_ratio: 4
+  transformer_dim: 256
+  transformer_depth: 4
+  transformer_heads: 8
+  transformer_mlp_ratio: 4.0
+  transformer_drop: 0.1
+  fpn_channels: 256
+freeze: null

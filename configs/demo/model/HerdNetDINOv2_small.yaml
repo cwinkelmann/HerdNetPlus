@@ -1,0 +1,15 @@
+name: 'HerdNetDINOv21'
+from_torchvision: False
+load_from: null
+resume_from: null
+kwargs:
+  backbone: 'vit_small_patch14_dinov2.lvd142m'
+  pretrained: True
+  pretrained_path: null
+  down_ratio: 4
+  head_conv: 64
+  output_channels: [192, 256, 384]
+  attention_layers: [-4, -3, -2, -1]
+  detection_head_type: 'multi_scale'
+  freeze_backbone: False
+freeze: null
