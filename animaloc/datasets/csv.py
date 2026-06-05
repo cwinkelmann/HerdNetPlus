@@ -343,6 +343,31 @@ class CSVDataset(Dataset):
                 tr_image = numpy.asarray(transformed['image'])
                 transformed.pop('image')
 
+                # Hard-negative passthrough: any keypoint whose `labels`
+                # entry equals `HARD_NEGATIVE_LABEL` (default 2) is a
+                # confirmed vegetation FP. ObjectAwareRandomCrop may have
+                # anchored the crop on one of these, but the target builder
+                # (FIDT / PointsToMask) is configured for num_classes that
+                # does not include the hard-negative class -- so we strip
+                # them here, leaving the crop as an "informative empty"
+                # tile for the loss. If no `labels` field is present we
+                # leave the keypoints untouched (backward compatible).
+                HARD_NEGATIVE_LABEL = 2
+                if 'labels' in transformed and len(transformed.get('keypoints', [])) > 0:
+                    kept_kp = []
+                    kept_label_fields = {k: [] for k in label_fields.keys()}
+                    for i, kp in enumerate(transformed['keypoints']):
+                        lab = transformed['labels'][i] if i < len(transformed['labels']) else None
+                        if lab is not None and int(lab) == HARD_NEGATIVE_LABEL:
+                            continue
+                        kept_kp.append(kp)
+                        for k in label_fields.keys():
+                            if k in transformed and i < len(transformed[k]):
+                                kept_label_fields[k].append(transformed[k][i])
+                    transformed['keypoints'] = kept_kp
+                    for k, v in kept_label_fields.items():
+                        transformed[k] = v
+
                 transformed['points'] = transformed['keypoints']
                 transformed.pop('keypoints')
 

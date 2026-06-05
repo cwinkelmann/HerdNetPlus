@@ -231,6 +231,8 @@ class ObjectAwareRandomCrop(DualTransform):
             edge_zone: int = 120,
             max_attempts: int = 10,
             translation_jitter: int = 0,
+            hard_negative_probability: float = 0.0,
+            hard_negative_label: int = 2,
             always_apply: bool = False,
             p: float = 1.0,
     ):
@@ -249,6 +251,17 @@ class ObjectAwareRandomCrop(DualTransform):
         # iguana config) to break any residual centre-bias the model might
         # otherwise learn from per-image position correlations.
         self.translation_jitter = translation_jitter
+        # hard_negative_probability: probability of anchoring the crop on a
+        # confirmed hard-negative (vegetation FP) keypoint instead of a
+        # foreground keypoint. Hard-negatives are identified by the
+        # `labels` field in albumentations' label_fields passthrough; a
+        # keypoint with `labels == hard_negative_label` (default 2) is
+        # treated as a hard-negative anchor. CSVDataset is expected to
+        # strip these from the target before the loss is computed, so the
+        # crop becomes an "informative empty" with the model forced to
+        # see vegetation patterns it has been wrong about.
+        self.hard_negative_probability = hard_negative_probability
+        self.hard_negative_label = hard_negative_label
 
         if self.min_edge_distance < 0:
             raise ValueError("min_edge_distance must be non-negative")
@@ -256,6 +269,13 @@ class ObjectAwareRandomCrop(DualTransform):
             raise ValueError("empty_probability must be between 0.0 and 1.0")
         if not 0.0 <= self.edge_probability <= 1.0:
             raise ValueError("edge_probability must be between 0.0 and 1.0")
+        if not 0.0 <= self.hard_negative_probability <= 1.0:
+            raise ValueError("hard_negative_probability must be between 0.0 and 1.0")
+        if self.empty_probability + self.hard_negative_probability > 1.0:
+            raise ValueError(
+                "empty_probability + hard_negative_probability must be ≤ 1.0; "
+                f"got {self.empty_probability} + {self.hard_negative_probability}"
+            )
         if self.max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
         if self.translation_jitter < 0:
@@ -497,6 +517,16 @@ class ObjectAwareRandomCrop(DualTransform):
         """Generate crop parameters based on image and keypoints (albumentations v2 API)."""
         img = data['image']
         keypoints = data.get('keypoints', [])
+        # In albumentations v2, label_fields registered via KeypointParams are
+        # packed INTO the keypoint tuples (extending them past (x, y)) and
+        # are NOT available as top-level kwargs to the transform. So we read
+        # labels from the keypoint's extra elements (kp[2], kp[3], ...).
+        # Convention: CSVDataset sets KeypointParams(label_fields=['labels', ...]),
+        # so kp[2] is the labels value when label_fields is non-empty.
+        # If no labels available, all keypoints default to "iguana" anchoring.
+        labels = data.get('labels', None)
+        if labels is None and len(keypoints) > 0 and len(keypoints[0]) >= 3:
+            labels = [kp[2] for kp in keypoints]
         image_height, image_width = img.shape[:2]
 
         # Validate crop size
@@ -514,19 +544,45 @@ class ObjectAwareRandomCrop(DualTransform):
                 f"Minimum crop size should be {2 * self.min_edge_distance}x{2 * self.min_edge_distance}"
             )
 
-        # Extract x,y coordinates from keypoints
-        keypoint_coords = [(kp[0], kp[1]) for kp in keypoints]
+        # Split keypoints by class label, when labels are available.
+        # iguana_coords = foreground anchors (label != hard_negative_label).
+        # hard_neg_coords = vegetation anchors (label == hard_negative_label).
+        # If no labels field is passed (older configs), treat every keypoint
+        # as iguana so behaviour is unchanged.
+        if labels is not None and len(labels) == len(keypoints):
+            iguana_coords = [(kp[0], kp[1]) for kp, lab in zip(keypoints, labels)
+                             if int(lab) != self.hard_negative_label]
+            hard_neg_coords = [(kp[0], kp[1]) for kp, lab in zip(keypoints, labels)
+                               if int(lab) == self.hard_negative_label]
+        else:
+            iguana_coords = [(kp[0], kp[1]) for kp in keypoints]
+            hard_neg_coords = []
 
-        # Decide whether to create empty crop or crop with keypoint
-        create_empty_crop = random.random() < self.empty_probability
+        # Three-way decision: hard-negative anchored / random empty / iguana anchored.
+        # H-branch only fires when an H keypoint exists; if it doesn't, the
+        # hnp budget collapses cleanly into the iguana-anchored branch
+        # (NOT into the random-empty branch — H absence shouldn't suddenly
+        # make 25% of crops random).
+        use_hard_negative = (
+            random.random() < self.hard_negative_probability
+            and len(hard_neg_coords) > 0
+        )
+        use_empty = (
+            not use_hard_negative
+            and random.random() < self.empty_probability
+        )
 
-        if not keypoint_coords or create_empty_crop:
-            # No keypoints or intentionally empty crop
+        if use_hard_negative:
+            # Crop anchored on a confirmed vegetation FP — same geometric
+            # logic as iguana-anchored, just a different anchor pool.
+            crop_x, crop_y = self._get_crop_with_keypoint(
+                hard_neg_coords, image_height, image_width
+            )
+        elif use_empty or not iguana_coords:
             crop_x, crop_y = self._get_random_crop_with_empty(image_height, image_width)
         else:
-            # Crop with keypoint at min distance from edges
             crop_x, crop_y = self._get_crop_with_keypoint(
-                keypoint_coords, image_height, image_width
+                iguana_coords, image_height, image_width
             )
 
         # Optional translation jitter: perturb the chosen crop position
@@ -534,17 +590,18 @@ class ObjectAwareRandomCrop(DualTransform):
         # inside the crop still inside (clamps if necessary), and never
         # leaves the image. This is the explicit "break the centre bias"
         # knob -- see CamouflageHerdNetConvNeXt centre-fixation analysis.
-        if self.translation_jitter > 0 and keypoint_coords and not create_empty_crop:
+        jitter_anchors = iguana_coords if not use_hard_negative else hard_neg_coords
+        if self.translation_jitter > 0 and jitter_anchors and not use_empty:
             j = self.translation_jitter
             dx = random.randint(-j, j)
             dy = random.randint(-j, j)
             new_x = max(0, min(crop_x + dx, image_width - self.width))
             new_y = max(0, min(crop_y + dy, image_height - self.height))
-            # Make sure at least one keypoint is still inside the new crop;
+            # Make sure at least one anchor is still inside the new crop;
             # if jitter pushed all of them out, keep the original position.
             kept = any(
                 new_x <= kx < new_x + self.width and new_y <= ky < new_y + self.height
-                for kx, ky in keypoint_coords
+                for kx, ky in jitter_anchors
             )
             if kept:
                 crop_x, crop_y = new_x, new_y
@@ -567,6 +624,10 @@ class ObjectAwareRandomCrop(DualTransform):
     # ------------------------------------------------------------------
     @property
     def targets_as_params(self) -> List[str]:
+        # 'labels' is intentionally NOT listed: in albumentations v2 it is
+        # packed into keypoint tuples and stripped from kwargs. Listing it
+        # here would trigger a "missing keys" ValueError. The transform
+        # reads labels from keypoint[2] (when available) instead.
         return ['image', 'keypoints']
 
     def get_params_dependent_on_targets(self, params: Dict) -> Dict:
@@ -574,7 +635,9 @@ class ObjectAwareRandomCrop(DualTransform):
 
     def get_transform_init_args_names(self) -> Tuple[str, ...]:
         return ('height', 'width', 'min_edge_distance', 'empty_probability',
-                'edge_probability', 'edge_zone', 'max_attempts', 'translation_jitter')
+                'edge_probability', 'edge_zone', 'max_attempts',
+                'translation_jitter', 'hard_negative_probability',
+                'hard_negative_label')
 
 # class ObjectAwareRandomCrop(DualTransform):
 #     """

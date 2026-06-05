@@ -73,7 +73,7 @@ def main():
 
     # Add output directory override if provided
     if args.output:
-        overrides.append(f"work_dir={args.output}")
+        overrides.append(f"+work_dir={args.output}")
 
     # Load config
     with initialize_config_dir(config_dir=config_dir, version_base="1.1"):

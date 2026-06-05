@@ -30,21 +30,31 @@ class LMDS:
     available under the MIT license '''
 
     def __init__(
-        self, 
+        self,
         kernel_size: tuple = (3,3),
-        adapt_ts: float = 100.0/255.0, 
+        adapt_ts: float = 100.0/255.0,
         neg_ts: float = 0.1,
-        score_threshold: float = 0.3,  # Absolute score threshold
+        score_threshold: float = 0.0,  # absolute score threshold (off by default)
 
     ) -> None:
         '''
         Args:
             kernel_size (tuple, optional): size of the kernel used to select local
                 maxima. Defaults to (3,3) (as in the paper).
-            adapt_ts (float, optional): adaptive threshold to select final points
-                from candidates. Defaults to 100.0/255.0 (as in the paper).
-            neg_ts (float, optional): negative sample threshold used to define if 
+            adapt_ts (float, optional): adaptive (per-image relative) threshold
+                used to select final points from candidates. The effective
+                per-image cutoff is `adapt_ts * est_map.max()`, so behavior
+                is image-dependent — see docs/notes/lmds_thresholds.md.
+                Defaults to 100.0/255.0 (as in the paper).
+            neg_ts (float, optional): negative sample threshold used to define if
                 an image is a negative sample or not. Defaults to 0.1 (as in the paper).
+            score_threshold (float, optional): absolute floor applied AFTER
+                `adapt_ts`. Predictions with raw score < this value are
+                dropped regardless of per-image peak. Default 0.0 = disabled
+                (back-compatible with pre-2026-06-02 behaviour). Recommended
+                when tuning for predictable cross-image behaviour;
+                values in [0.3, 0.5] are typical. See
+                docs/notes/lmds_thresholds.md for rationale.
         '''
 
         assert kernel_size[0] == kernel_size[1], \
@@ -122,8 +132,15 @@ class LMDS:
         # local maxima
         est_map = self._local_max(est_map.unsqueeze(0).unsqueeze(0))
 
-        # adaptive threshold for counting
+        # adaptive (per-image relative) threshold for counting.
+        # Effective cutoff = adapt_ts * peak score in this image,
+        # so it behaves leniently on near-empty images. See
+        # docs/notes/lmds_thresholds.md.
         est_map[est_map < self.adapt_ts * est_map_max] = 0
+        # absolute score floor, applied on top of adapt_ts. Default 0
+        # leaves the historic adapt_ts-only behaviour untouched.
+        if self.score_threshold > 0:
+            est_map[est_map < self.score_threshold] = 0
         scores_map = torch.clone(est_map)
         est_map[est_map > 0] = 1
 
@@ -145,12 +162,13 @@ class LMDS:
 class HerdNetLMDS(LMDS):
 
     def __init__(
-        self, 
-        up: bool = True, 
-        kernel_size: tuple = (3,3), 
+        self,
+        up: bool = True,
+        kernel_size: tuple = (3,3),
         adapt_ts: float = 0.3,
         neg_ts: float = 0.1,
-        scale_factor: int = 16
+        scale_factor: int = 16,
+        score_threshold: float = 0.0,
         ) -> None:
         '''
         Args:
@@ -158,13 +176,23 @@ class HerdNetLMDS(LMDS):
                 Defaults to True.
             kernel_size (tuple, optional): size of the kernel used to select local
                 maxima. Defaults to (3,3) (as in the paper).
-            adapt_ts (float, optional): adaptive threshold to select final points
-                from candidates. Defaults to 0.3.
-            neg_ts (float, optional): negative sample threshold used to define if 
+            adapt_ts (float, optional): adaptive (per-image relative) threshold.
+                Effective cutoff = adapt_ts * image_peak — see
+                docs/notes/lmds_thresholds.md for why this complicates tuning.
+                Defaults to 0.3.
+            neg_ts (float, optional): negative sample threshold used to define if
                 an image is a negative sample or not. Defaults to 0.1 (as in the paper).
+            score_threshold (float, optional): absolute score floor applied
+                AFTER adapt_ts. Predictable, image-independent behaviour.
+                Default 0.0 = disabled (back-compatible).
         '''
 
-        super().__init__(kernel_size=kernel_size, adapt_ts=adapt_ts, neg_ts=neg_ts)
+        super().__init__(
+            kernel_size=kernel_size,
+            adapt_ts=adapt_ts,
+            neg_ts=neg_ts,
+            score_threshold=score_threshold,
+        )
 
         self.up = up
         self.scale_factor = scale_factor

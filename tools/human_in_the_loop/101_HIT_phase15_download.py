@@ -436,6 +436,7 @@ def apply_corrections_to_master(
     iteration_id: str,
     edit_log_path: Path,
     tile_to_master_image: "dict[str, AnnotatedImage] | None" = None,
+    untouched_pred_is_hard_neg: bool = False,
 ) -> tuple[HastyAnnotationV2, CategoryCounts]:
     """Compute deltas between pre and post and apply to the master Hasty.
 
@@ -510,6 +511,7 @@ def apply_corrections_to_master(
                 post_class_name=post_label.class_name,
                 was_moved=was_moved,
                 was_deleted=False,
+                untouched_pred_is_hard_neg=untouched_pred_is_hard_neg,
             )
 
             score = (pre_label.attributes or {}).get("score") if pre_label.attributes else None
@@ -537,10 +539,15 @@ def apply_corrections_to_master(
             elif category == "A":
                 _add_keypoint(master_img, post_xy, class_name=CANONICAL_CLASS_NAME)
             elif category == "H":
-                # Hard-negative promotion: add label to master under the
-                # non-iguana class the reviewer chose. Future training sees
-                # an explicit negative at this position.
-                _add_keypoint(master_img, post_xy, class_name=post_label.class_name)
+                # Hard-negative promotion. Normally post_label.class_name is
+                # the reviewer-chosen non-iguana class. But when this H came
+                # from `untouched_pred_is_hard_neg`, post_class is still the
+                # suffixed pred class (e.g. `iguana_point_pred`) — we must
+                # write the canonical hard-neg class instead.
+                hn_class = post_label.class_name
+                if untouched_pred_is_hard_neg and is_iguana_class(post_label.class_name):
+                    hn_class = "not_iguana_but_similar_look"
+                _add_keypoint(master_img, post_xy, class_name=hn_class)
 
         # DELETED (pre with no post match): category B / E / D based on suffix.
         for i in unmatched_pre:
@@ -581,12 +588,24 @@ def apply_corrections_to_master(
                         class_name="not_iguana_but_similar_look",
                     )
 
-        # NEWLY DRAWN (post with no pre match). A or H based on class.
+        # NEWLY DRAWN (post with no pre match). Under the explicit-positive
+        # rule: only iguana_point_gt counts as "A" (= iguana). Other iguana
+        # variants (e.g. user drew with default iguana_point class) we
+        # treat conservatively as kept_unchanged so they DON'T leak into
+        # master. Non-iguana classes still route to H.
         for j in unmatched_post:
             post_label = post_labels[j]
             post_xy = _keypoint_xy(post_label)
+            post_cn = (post_label.class_name or "").lower()
             is_iguana = is_iguana_class(post_label.class_name)
-            category = "A" if is_iguana else "H"
+
+            if not is_iguana:
+                category = "H"
+            elif post_cn.endswith("_gt"):
+                category = "A"  # explicitly confirmed iguana
+            else:
+                category = "kept_unchanged"  # ambiguous — don't promote
+
             edit_log_rows.append({
                 "timestamp": datetime.utcnow().isoformat(),
                 "iteration_id": iteration_id,
@@ -603,9 +622,9 @@ def apply_corrections_to_master(
                 "notes": "newly_drawn",
             })
             _bump(counts, category)
-            if image_name in master_image_by_name:
+            if image_name in master_image_by_name and category in ("A", "H"):
                 target_class = (
-                    CANONICAL_CLASS_NAME if is_iguana else post_label.class_name
+                    CANONICAL_CLASS_NAME if category == "A" else post_label.class_name
                 )
                 _add_keypoint(
                     master_image_by_name[image_name], post_xy, class_name=target_class
@@ -696,6 +715,7 @@ def phase15_cvat_download_and_update(
     output_master_hasty_path: Path,
     edit_log_path: Path,
     iteration_id: str | None = None,
+    untouched_pred_is_hard_neg: bool = False,
 ) -> CategoryCounts:
     """Download corrections from CVAT and apply to the master Hasty.
 
@@ -705,6 +725,12 @@ def phase15_cvat_download_and_update(
     edit_log_path: append-only CSV audit trail (one row per edit).
     iteration_id: string used in the edit log; defaults to the report's
         analysis_date.
+    untouched_pred_is_hard_neg: opt-in alternate rule for iterations where
+        the reviewer skipped explicit deletions (only re-classed confirmed
+        iguanas to `_gt`). When True, any pred_only/borderline kept
+        untouched in CVAT is promoted to H instead of kept_unchanged, and
+        the master gets a `not_iguana_but_similar_look` label at that
+        position. Default False (original explicit-positive rule).
     """
     report_config = DatasetCorrectionReportConfig.load(report_path)
     iteration_id = iteration_id or report_config.analysis_date
@@ -786,6 +812,7 @@ def phase15_cvat_download_and_update(
         iteration_id=iteration_id,
         edit_log_path=edit_log_path,
         tile_to_master_image=tile_to_master_image,
+        untouched_pred_is_hard_neg=untouched_pred_is_hard_neg,
     )
 
     output_master_hasty_path.parent.mkdir(parents=True, exist_ok=True)

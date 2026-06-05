@@ -7,6 +7,9 @@ description: Architecture and training strategy insights from completed experime
 
 Accumulated knowledge from training experiments on the iguana detection task. Apply these insights when advising on model selection, dataset preparation, training configuration, or experiment design.
 
+## READ FIRST: Phase History
+Before proposing any new experiment, read [`PHASE_HISTORY.md`](PHASE_HISTORY.md) in this directory — it's the phase-by-phase index (Phase 1 → 15 → al_v3) with locked production decisions, active questions, and a list of experiments you should NOT re-run. Saves time and avoids re-deriving conclusions from scratch.
+
 ## Architecture Rankings (iguana detection, 512x512 crops)
 
 1. **ConvNeXt Tiny** — Best overall. Consistently highest F1 (0.93-0.94). Stable convergence, minimal oscillation. Use as the default choice.
@@ -118,6 +121,15 @@ The evaluator supports `validate_on: f1_score | f2_score | f5_score | recall | p
 - `adapt_ts=0.3` (default): conservative, high precision
 - `adapt_ts=0.15`: catches more detections, higher recall
 - `adapt_ts=0.10`: aggressive, may overdetect
+
+**Important caveat — `adapt_ts` is relative, not absolute.** It applies as
+`adapt_ts × image_peak_score`, so behaviour varies by image and couples
+to model calibration drift across epochs. See
+[`docs/notes/lmds_thresholds.md`](../../../docs/notes/lmds_thresholds.md)
+for the deep dive. A new `score_threshold` parameter (absolute floor,
+default 0.0 = off) was added 2026-06-02 to make precision/recall tuning
+predictable. Prefer `score_threshold` for the actual trade-off; keep
+`adapt_ts` only as a local-maxima sharpener.
 
 ### Strategy: train for recall, tune precision at inference
 Train with `validate_on: f2_score` or `f5_score` and a lower `adapt_ts`. The saved model will favor recall. At inference time, raise the confidence threshold to control false positives. This is better than training a precision-biased model and trying to recover missed detections.

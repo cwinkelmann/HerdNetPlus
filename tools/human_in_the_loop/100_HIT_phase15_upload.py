@@ -173,6 +173,9 @@ def phase15_cvat_upload(
     include_matched: bool = False,
     only_fp_images: bool = True,
     base_class_name: str = "iguana_point",
+    max_fp_images: int | None = None,
+    min_gt_count: int = 0,
+    ranking_mode: str = "count",
 ) -> DatasetCorrectionReportConfig:
     """Hungarian-merge GT+predictions and push to CVAT for review.
 
@@ -190,6 +193,18 @@ def phase15_cvat_upload(
     include_matched: if True also push agreed-upon GT points (full review).
             If False (default) only push points that disagree — much shorter
             review queue per iteration.
+    min_gt_count: drop images whose GT count (matched + gt_only) is below
+            this floor. Annotation gaps cluster in dense-colony images, so
+            raising this to e.g. 3 concentrates the reviewer's time on the
+            highest-yield images. 0 = no floor.
+    ranking_mode: how to pick the top-`max_fp_images` when capping.
+            "count" (default, original behaviour) = sort by len(pred_only)
+                — biggest haystacks first.
+            "score_sum" = sort by sum of pred_only scores
+                — images where the model is most confident about its
+                FPs surface first. Tends to raise A / (A+H) yield because
+                high-confidence pred_only is more likely a real iguana the
+                annotator missed than a vegetation hallucination.
 
     Returns the DatasetCorrectionReportConfig pointing at the intermediate
     Hasty file, which ``101_HIT_phase15_download.py`` consumes.
@@ -274,6 +289,49 @@ def phase15_cvat_upload(
             raise ValueError(
                 "After only_fp_images filter, no images remain — nothing to upload."
             )
+
+    # GT-density floor: drop images with fewer than min_gt_count GT points
+    # (matched + gt_only). Annotation gaps cluster in dense-colony images,
+    # so this concentrates reviewer attention on the highest-yield set.
+    if min_gt_count > 0:
+        floored = [r for r in results if (len(r.matched) + len(r.gt_only)) >= min_gt_count]
+        n_dropped = len(results) - len(floored)
+        floor_stats = merge_summary(floored)
+        logger.info(
+            f"GT-density floor (>= {min_gt_count} GT pts): keeping "
+            f"{len(floored)} of {len(results)} images "
+            f"(dropped {n_dropped} sparse images). "
+            f"After floor: matched={floor_stats['matched']}, "
+            f"gt_only={floor_stats['gt_only']}, pred_only={floor_stats['pred_only']}, "
+            f"borderline={floor_stats['borderline']}"
+        )
+        results = floored
+        if not results:
+            raise ValueError(
+                f"After min_gt_count={min_gt_count} filter, no images remain."
+            )
+
+    # Bound the review batch by total image count.
+    if max_fp_images is not None and len(results) > max_fp_images:
+        if ranking_mode == "score_sum":
+            key_fn = lambda r: -sum(s for _, _, s in r.pred_only)
+            mode_label = "score_sum"
+        elif ranking_mode == "count":
+            key_fn = lambda r: -len(r.pred_only)
+            mode_label = "count"
+        else:
+            raise ValueError(
+                f"ranking_mode must be 'count' or 'score_sum', got {ranking_mode!r}"
+            )
+        results = sorted(results, key=key_fn)[:max_fp_images]
+        ranked_stats = merge_summary(results)
+        logger.info(
+            f"Capped review batch at top {max_fp_images} images by "
+            f"{mode_label}: matched={ranked_stats['matched']}, "
+            f"gt_only={ranked_stats['gt_only']}, "
+            f"pred_only={ranked_stats['pred_only']}, "
+            f"borderline={ranked_stats['borderline']}"
+        )
 
     logger.info(f"Loading Hasty GT: {config.subset_base_path / config.hasty_ground_truth_annotation_name}")
     hA_ground_truth = HastyAnnotationV2.from_file(
@@ -381,26 +439,41 @@ def phase15_cvat_upload(
         f"Launching CVAT task: project={CVAT_PROJECT_NAME!r}, "
         f"organization={CVAT_ORGANIZATION!r}, anno_key={config.dataset_name!r}"
     )
-    # Use segment_size (= job_size in CVAT terminology) so all samples
-    # land in ONE task, partitioned into multiple jobs of 50. Cleaner UX
-    # than task_size=50 (which created ~5 tasks per upload).
-    #
-    # If the single-task data POST times out (the original 504 we hit at
-    # 225 images / ~450 MB), fall back to task_size=150 + segment_size=50.
-    dataset.annotate(
-        anno_key=config.dataset_name,
-        label_field="detection",
-        label_type="keypoints",
-        classes=provenance_classes,
-        # Declare hasty_id as a CVAT attribute so it round-trips with the
-        # label even if the reviewer relocates it. The "score" field is
-        # historical; not load-bearing for the diff.
-        attributes=["hasty_id", "score"],
-        segment_size=50,
-        launch_editor=True,
-        organization=CVAT_ORGANIZATION,
-        project_name=CVAT_PROJECT_NAME,
-    )
+    # Sweet-spot tuning for app.cvat.ai's nginx + processing limits:
+    # - image_quality=50 (was 75 default): cuts per-image bytes ~3×, so
+    #   CVAT can process more images per upload in time.
+    # - task_size=500, segment_size=50: 10 jobs of 50 imgs/task. With
+    #   q=50 → ~25 MB per data POST, well under the 100 MB nginx ceiling
+    #   AND fast enough for CVAT processing (vs 504 at q=75/task=200).
+    try:
+        dataset.annotate(
+            anno_key=config.dataset_name,
+            label_field="detection",
+            label_type="keypoints",
+            classes=provenance_classes,
+            attributes=["hasty_id", "score"],
+            task_size=50,
+            image_quality=75,
+            launch_editor=True,
+            organization=CVAT_ORGANIZATION,
+            project_name=CVAT_PROJECT_NAME,
+        )
+    except Exception as e:
+        # CVAT errors sometimes contain megabytes of raw image bytes in the
+        # response body or request payload echo. Strip non-printables and
+        # truncate hard so the log doesn't get flooded with binary garbage.
+        msg = str(e)
+        printable = "".join(c if c.isprintable() or c in "\t\n\r" else "."
+                            for c in msg)
+        if len(printable) > 500:
+            printable = printable[:300] + f"... [+{len(printable)-300} chars] ..."
+        status = getattr(getattr(e, "response", None), "status_code", "?")
+        url = getattr(getattr(e, "request", None), "url", "")
+        logger.error(f"CVAT upload failed (HTTP {status}) at {url}: {printable}")
+        # Don't re-raise — the traceback would dump the request payload
+        # (megabytes of binary image bytes) into the log. Caller can
+        # inspect the saved report config + intermediate Hasty.
+        return report_config
     logger.info(
         f"Done. Report config (download step input): {report_config_path}\n"
         f"  Image->Hasty-dataset mapping: {mapping_path}"

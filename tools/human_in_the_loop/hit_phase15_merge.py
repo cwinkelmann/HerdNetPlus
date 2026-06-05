@@ -460,44 +460,83 @@ def classify_corrected_label(
     post_class_name: str | None,
     was_moved: bool,
     was_deleted: bool,
+    untouched_pred_is_hard_neg: bool = False,
 ) -> str:
     """Map a (pre, post) label pair back to a Phase-15 edit category.
 
-    Implicit-action rule (no class re-typing required in CVAT):
-      A: kept as iguana   — pred_only/borderline kept by reviewer
-                            -> add to master as iguana_point
+    **Explicit-positive-selection rule (iter-2+):**
+      Only predictions whose post-class is `iguana_point_gt` get promoted to
+      master as `iguana_point`. Leaving a `iguana_point_pred` red point
+      untouched in CVAT = "no opinion / skip" = kept_unchanged. This makes
+      the review zero-cost-by-default: the reviewer only re-classes the
+      ones they're CONFIRMING. Everything else is implicitly skipped.
+
+    **untouched_pred_is_hard_neg (opt-in, per iteration):**
+      Some iterations the reviewer trades-off: they explicitly re-class
+      every confirmed iguana to `_gt` and *skip the deletions* on the
+      rest to save time. With this flag, any pred_only/borderline that
+      was LEFT UNTOUCHED is promoted to H (hard negative) instead of
+      kept_unchanged. The caller must also write the master label at
+      pre_xy with class `not_iguana_but_similar_look` (the canonical
+      hard-neg class) instead of post_class_name, because post_class is
+      still the suffixed pred class.
+
+    Categories:
+      A: kept as iguana   — pre is pred_only/borderline AND post_class == `iguana_point_gt`
+                            (reviewer explicitly confirmed) -> add to master as iguana_point
       B: false GT removed — gt_only/matched DELETED by reviewer
                             -> remove from master
-      C: relocated        — pre <-> post position differs >1 px (still iguana)
+      C: relocated        — pre <-> post position differs >1 px AND post is iguana_point_gt
+                            (only relocate to master if explicitly confirmed)
       H: hard_negative    — pred_only/borderline DELETED by reviewer
                             OR pred_only/borderline KEPT with reviewer-set
-                            non-iguana class (e.g. not_iguana_but_similar_look)
-                            -> add to master at that position as a non-iguana
-                            label (default: not_iguana_but_similar_look)
-
-    Categories D (borderline) and E (confirmed FP) from the previous version
-    collapse into A and H respectively under the simpler rule.
+                            non-iguana class
+                            OR (when `untouched_pred_is_hard_neg=True`)
+                            pred_only/borderline KEPT untouched.
+                            -> add to master at that position as a non-iguana label
+      kept_unchanged: any other case (notably: pred_only that's left as red
+                            untouched — reviewer expressed no opinion;
+                            unless `untouched_pred_is_hard_neg=True`)
     """
     pre = pre_class_name.lower() if pre_class_name else ""
+    post = post_class_name.lower() if post_class_name else ""
 
     if was_deleted:
         if pre.endswith(SUFFIX_GT_ONLY) or pre.endswith(SUFFIX_MATCHED):
             return "B"  # GT was wrong, remove
         if pre.endswith(SUFFIX_PRED_ONLY) or pre.endswith(SUFFIX_BORDERLINE):
             return "H"  # deleted model-suggested point = hard negative
-        return "H"  # unknown provenance, treat conservatively as hard-neg
-
-    # Kept (not deleted).
-    # Explicit class re-typing to a non-iguana class also routes to H
-    # (the optional path the reviewer can use to specify the negative type).
-    if post_class_name and not is_iguana_class(post_class_name):
         return "H"
 
-    if was_moved:
-        return "C"
-    if pre.endswith(SUFFIX_PRED_ONLY) or pre.endswith(SUFFIX_BORDERLINE):
-        return "A"  # kept = iguana
-    if pre.endswith(SUFFIX_GT_ONLY) or pre.endswith(SUFFIX_MATCHED):
+    # Kept (not deleted).
+    # Explicit non-iguana class -> H (hard negative).
+    if post and not is_iguana_class(post_class_name):
+        return "H"
+
+    # Pred-only (red): explicit-positive — ONLY promote if reviewer
+    # re-classed to iguana_point_gt. Untouched red = "no opinion" by
+    # default; with `untouched_pred_is_hard_neg=True` untouched red is
+    # promoted to H.
+    if pre.endswith(SUFFIX_PRED_ONLY):
+        if post.endswith(SUFFIX_GT_ONLY):
+            return "C" if was_moved else "A"
+        if untouched_pred_is_hard_neg:
+            return "H"
         return "kept_unchanged"
-    return "kept_unchanged"
+
+    # Borderline (yellow): KEEPING it (even at the same class) counts as
+    # confirmation — borderline means model & GT both saw something here
+    # but disagreed on position. A kept borderline = "yes, this is a real
+    # iguana, GT just had it slightly off." Promote to master.
+    if pre.endswith(SUFFIX_BORDERLINE):
+        # Any iguana-class post (still borderline, or re-classed to _gt)
+        # gets promoted. Non-iguana post already routed to H above.
+        return "C" if was_moved else "A"
+
+    # Matched / gt_only kept: only flag a relocation if it was actually moved.
+    if pre.endswith(SUFFIX_GT_ONLY) or pre.endswith(SUFFIX_MATCHED):
+        if was_moved:
+            return "C"
+        return "kept_unchanged"
+
     return "kept_unchanged"

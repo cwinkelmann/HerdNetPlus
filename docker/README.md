@@ -140,6 +140,56 @@ docker run --rm --gpus all \
 
 The volume mounts mask `/app/data/{train,val,test}` from the baked image, so the running container uses the host data instead. Same image, any N.
 
+## 80 GB GPU tuning (A100 / H100)
+
+The phase-13 production recipe was tuned on a 16 GB GPU. On an 80 GB
+device (A100-80GB, H100-80GB) you can run **~8× the throughput**
+without touching the code — just bigger batches + more workers.
+
+### Single-GPU 80 GB recipe
+
+```bash
+docker run --rm --gpus all --shm-size=16g \
+  -e WANDB_API_KEY=$WANDB_API_KEY \
+  -e WANDB_PROJECT=hn_phase13_data_scaling \
+  -e TRAIN_N=full \
+  -e BATCH_SIZE=32 \
+  -e NUM_WORKERS=24 \
+  -e AUG_MULT=75 \
+  dockerkartok/herdnet:phase13-nfull-latest
+```
+
+Knob walkthrough:
+
+| Knob | 16 GB default | 80 GB tuned | Why |
+|---|---|---|---|
+| `BATCH_SIZE` | 4 | **32** (try 64 if free VRAM remains) | B4 ConvNeXt at 512×512 + FIDT mask uses ~10 GB at batch=4; scales roughly linearly. 32 fits comfortably with headroom for the validate stitcher pass |
+| `NUM_WORKERS` | 8 | **24** | 8× batch needs more dataloader throughput. Cap at `min(24, num_cpu_cores)` |
+| `--shm-size` | `8g` | **`16g`** | Bigger batches × more workers = more shared-memory traffic |
+| Learning rate | 8e-5 (config) | **6.4e-4** if you keep epochs constant | Linear scaling rule for 8× batch. Or keep `lr=8e-5` and double `warmup_iters` to 1000 for safety |
+| `AUG_MULT` | 75 | **75** (unchanged) | Phase 14 ruled out lower values for production convergence |
+
+Set `lr` via a hydra override appended to the entrypoint command if you want to override the config default — but most users get away with the config default + bigger batch, since AdamW handles modest LR mismatches.
+
+Expected speedup vs 16 GB:
+- Training step ~6-8× faster (limited by data-loader throughput, not compute)
+- Validation pass ~8× faster (batch=32 vs 4 through the stitcher)
+- Full N=full run: phase-13 took ~3 days on 16 GB; expect **~6-10 h** on a single 80 GB GPU
+
+### Multi-GPU
+
+Not supported in this image yet. The trainer at
+`animaloc/train/trainers.py:170` does a single `model.to(self.device)`
+with no DDP wrapping. Adding it is **~30 lines of
+DistributedDataParallel boilerplate** per `docs/refactor.md` Tier 2 —
+deliberately not Lightning. Cheaper interim if you're stuck on a
+multi-GPU box: keep `BATCH_SIZE=32` but raise effective batch via
+gradient accumulation (~5 extra lines in `trainers.py`).
+
+When the dataset grows past ~1000 frames *and* a single 80 GB GPU
+saturates wall-clock budget, then it's time to do the DDP patch. Until
+then, single-GPU 80 GB is the sweet spot.
+
 ## What gets uploaded to wandb
 
 **Per-epoch metric curves stream live during training (same observability you have locally). The model checkpoint is the only thing held for the end — uploaded once, to save wandb storage.**

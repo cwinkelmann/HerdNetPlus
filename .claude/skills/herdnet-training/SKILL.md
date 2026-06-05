@@ -1,5 +1,8 @@
 # HerdNet Training Skill
 
+## READ FIRST: Phase History
+Before designing a new experiment, read [`../training-insights/PHASE_HISTORY.md`](../training-insights/PHASE_HISTORY.md). It is the phase-by-phase index (Phase 1 augplus → Phase 13 data scaling → Phase 14 ensemble fail → Phase 15 annotation cleanup → al_v3) with the list of decisions already locked and experiments you should NOT re-run.
+
 ## Trigger Keywords
 HerdNet, animaloc, FIDT, point detection, wildlife counting, DLA-34, DLA-60, DLA-102, DLA-169, DINOv2, HerdNetStitcher, LMDS, Hann window, patcher, CSVDataset, aerial wildlife, density map, focal inverse distance transform, drone counting, iguana detection, point annotation, HerdNetEvaluator, HerdNetLMDS, tile inference, overlapping patches, down_ratio, head_conv, matching_radius, ObjectAwareRandomCrop, FocalLoss, LossWrapper, warmup_iters, backbone_lr
 
