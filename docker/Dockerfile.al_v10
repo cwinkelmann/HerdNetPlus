@@ -1,0 +1,58 @@
+# HerdNet al_v10 training container — post phase-15 iter-7.
+#
+# H-aware loader (hard_negative_probability=0.25, empty_probability=0.10).
+# Val: 5-island ortho hold-out (646 imgs / 9 datasets) — a proxy for
+# "would the model make census-grade predictions on never-seen
+# orthomosaics?".
+#
+# Sized for an 80 GB GPU. Override via `docker run -e`.
+
+FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
+
+LABEL maintainer="christian.winkelmann@gmail.com"
+LABEL description="HerdNet al_v10 — post phase-15 iter-7, H-aware loader, 5-island ortho val"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    LC_NUMERIC=C \
+    DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git tini libgl1 libglib2.0-0 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY pyproject.toml /app/
+RUN pip install --upgrade pip setuptools wheel
+COPY animaloc /app/animaloc/
+RUN pip install -e ".[tracking]"
+
+COPY configs /app/configs/
+COPY tools   /app/tools/
+COPY best_models /app/best_models/
+COPY data /app/data/
+
+COPY docker/al_v10_entrypoint.sh /app/docker/
+COPY docker/upload_model.py      /app/docker/
+RUN chmod +x /app/docker/al_v10_entrypoint.sh
+
+ENV SEED=42 \
+    WANDB_PROJECT=hn_active_learning \
+    WANDB_FLAG=True \
+    WANDB_RUN=al_v10_b4_seed42_balanced \
+    BATCH_SIZE=32 \
+    NUM_WORKERS=24 \
+    AUG_MULT=10 \
+    EPOCHS=30 \
+    LR=6.4e-4 \
+    EMP_PROB=0.10 \
+    HARD_NEG_PROB=0.25 \
+    VALIDATE_ON=f2_score \
+    ADAPT_TS=0.20 \
+    SCORE_THRESHOLD=0.30 \
+    UPLOAD_MODEL=1
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/docker/al_v10_entrypoint.sh"]
