@@ -1,0 +1,93 @@
+# Phase 14 — cross-arch ensemble member, B4 (ConvNeXt-V2 + BiFPN + DeformConv).
+#
+# Recipe: F5-weighted checkpoint selection with early stop, lower CE
+# foreground weight (5.0 -> 2.0) so the model stops aggressively
+# suppressing weak detections, augmentation_multiplier=1 so per-epoch
+# dynamics are readable, warm-start from the corresponding Phase-8
+# member of the same seed.
+#
+# The runscript (run_phase14.sh) overrides:
+#   - seed
+#   - model.load_from  (best_models/phase8/b4_seed<S>/best_model.pth)
+#   - wandb_run, wandb_tags, hydra.run.dir
+#   - datasets.{train,validate,test}.{csv_file,root_dir}
+
+defaults:
+  - /losses: herdnet_fmo03
+  - /datasets: data_scaling
+  - /training_settings: evaluator
+  - /model: HerdNetTimmConvNext_Camouflaged_V2
+  - _self_
+
+wandb_flag: True
+seed: 42
+device_name: null
+wandb_project: 'hn_phase14_ensemble'
+wandb_entity: 'karisu'
+wandb_run: 'phase14_b4_default'
+wandb_tags: ['phase14', 'ensemble', 'b4', 'f5_recipe']
+wandb_notes: |
+  Phase 14 ensemble member — B4 (CamouflageHerdNetConvNeXtV2).
+  Recipe:
+    - validate_on=f5_score, select_mode=max
+    - early_stopping=True, patience=3, min_delta=0.005
+    - CE foreground weight 5.0 -> 2.0
+    - augmentation_multiplier=1 (visible per-epoch dynamics)
+    - adapt_ts=0.20 (training-time eval, aligned with target operating point)
+  Warm-start from best_models/phase8/b4_seed<seed>/best_model.pth.
+
+datasets:
+  num_classes: 2
+  class_def:
+    1: 'iguana'
+  train:
+    augmentation_multiplier: 1
+
+losses:
+  CrossEntropyLoss:
+    kwargs:
+      weight:
+        - ${losses.CrossEntropyLoss.background_class_weight}
+        - 2.0
+
+training_settings:
+  lr: 8.0e-05
+  epochs: 10
+  batch_size: 8
+  num_workers: 16
+  warmup_iters: 500
+  valid_freq: 1
+  print_freq: 20
+  early_stopping: True
+  early_stopping_patience: 3
+  early_stopping_min_delta: 0.005
+  early_stopping_restore_best_weights: True
+  auto_lr:
+    mode: 'max'
+    patience: 4
+    threshold: 1e-4
+    threshold_mode: 'rel'
+    cooldown: 2
+    min_lr: 1e-8
+    verbose: True
+  evaluator:
+    select_mode: 'max'
+    validate_on: 'f5_score'
+    kwargs:
+      lmds_kwargs:
+        adapt_ts: 0.20
+  visualiser:
+    down_ratio: 4
+  debug_visualiser: null
+
+model:
+  load_from: null
+  resume_from: null
+  kwargs:
+    pretrained: True
+    down_ratio: 4
+    backbone_size: tiny
+
+hydra:
+  run:
+    dir: ./output/phase14_b4_default/${now:%Y-%m-%d}/${now:%H-%M-%S}

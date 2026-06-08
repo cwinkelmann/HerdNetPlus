@@ -27,7 +27,7 @@ def _common_overrides(training_data, tmp_output_dir):
         f"datasets.train.root_dir={training_data['train_root']}",
         f"datasets.validate.csv_file={training_data['val_csv']}",
         f"datasets.validate.root_dir={training_data['val_root']}",
-        "training_settings.epochs=1",
+        "training_settings.epochs=2",
         "training_settings.batch_size=2",
         "training_settings.num_workers=0",
         "training_settings.warmup_iters=1",
@@ -43,7 +43,6 @@ def tmp_output_dir(tmp_path):
     return str(tmp_path / "output")
 
 
-@pytest.mark.slow
 def test_train_dla34(load_config, training_data, tmp_output_dir):
     overrides = _common_overrides(training_data, tmp_output_dir) + [
         "datasets.num_classes=7",
@@ -51,11 +50,11 @@ def test_train_dla34(load_config, training_data, tmp_output_dir):
         "losses.CrossEntropyLoss.kwargs.weight=[0.1,1.0,2.0,1.0,6.0,12.0,1.0]",
     ]
     cfg = load_config("dla34_delplanque", overrides=overrides)
-    results = main(cfg)
+    results, metrics = main(cfg)
     assert results is not None
+    assert 'f1_score' in metrics
 
 
-@pytest.mark.slow
 def test_train_timm_dla34(load_config, training_data, tmp_output_dir):
     overrides = _common_overrides(training_data, tmp_output_dir) + [
         "datasets.num_classes=7",
@@ -63,8 +62,9 @@ def test_train_timm_dla34(load_config, training_data, tmp_output_dir):
         "losses.CrossEntropyLoss.kwargs.weight=[0.1,1.0,2.0,1.0,6.0,12.0,1.0]",
     ]
     cfg = load_config("dla34_timm", overrides=overrides)
-    results = main(cfg)
+    results, metrics = main(cfg)
     assert results is not None
+    assert 'f1_score' in metrics
 
 
 @pytest.mark.slow
@@ -75,8 +75,9 @@ def test_train_convnext_camouflaged(load_config, training_data, tmp_output_dir):
         "losses.CrossEntropyLoss.kwargs.weight=[0.1,1.0,2.0,1.0,6.0,12.0,1.0]",
     ]
     cfg = load_config("convnext_camouflaged", overrides=overrides)
-    results = main(cfg)
+    results, metrics = main(cfg)
     assert results is not None
+    assert 'f1_score' in metrics
 
 
 def _read_training_log(work_dir):
@@ -108,7 +109,7 @@ def test_early_stopping_default_patience_does_not_trigger(
         # Deliberately omit patience — exercises the fallback path.
     ]
     cfg = load_config("dla34_delplanque", overrides=overrides)
-    work_dir = main(cfg)
+    work_dir, _ = main(cfg)
     log_text = _read_training_log(work_dir)
     assert "Early stopping triggered at epoch" not in log_text, (
         "Default fallback should prevent early stopping from firing in 2 epochs; "
@@ -136,7 +137,7 @@ def test_early_stopping_triggers_when_metric_does_not_improve(
         "++training_settings.early_stopping_min_delta=10.0",
     ]
     cfg = load_config("dla34_delplanque", overrides=overrides)
-    work_dir = main(cfg)
+    work_dir, _ = main(cfg)
     log_text = _read_training_log(work_dir)
     assert "Early stopping triggered at epoch" in log_text, (
         "Patience=1 with unreachable min_delta should stop at epoch 1."

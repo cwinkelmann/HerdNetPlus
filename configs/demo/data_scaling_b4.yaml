@@ -1,0 +1,71 @@
+# Phase 13 — data-scaling experiment, B4 backbone (locked).
+#
+# Architecture / loss / augmentation are all frozen at the Phase-8
+# production stack so the only varying axis is training-set size N.
+# The training script (run_phase13_scaling.sh) overrides
+# datasets.train.csv_file / root_dir per N, the model.load_from for
+# warm-start, and the wandb_run / hydra.run.dir for output isolation.
+
+defaults:
+  - /losses: herdnet_fmo03
+  - /datasets: data_scaling
+  - /training_settings: evaluator
+  - /model: HerdNetTimmConvNext_Camouflaged_V2
+  - _self_
+
+wandb_flag: True
+seed: 42
+device_name: null
+wandb_project: 'hn_phase13_data_scaling'
+wandb_entity: 'karisu'
+wandb_run: 'phase13_default'
+wandb_tags: ['phase13', 'data_scaling', 'b4', 'warm_start']
+wandb_notes: |
+  Phase 13 data-scaling experiment.
+  Architecture: HerdNetTimmConvNext_Camouflaged_V2 (B4).
+  Loss: herdnet_fmo03 (override of native density_aware_fmo03_aux).
+  Warm-start from best_models/phase8/b4_seed42/best_model.pth.
+
+datasets:
+  num_classes: 2
+  class_def:
+    1: 'iguana'
+
+training_settings:
+  lr: 8.0e-05
+  epochs: 30
+  batch_size: 4
+  num_workers: 8
+  warmup_iters: 500
+  valid_freq: 2
+  print_freq: 20
+  auto_lr:
+    mode: 'max'
+    patience: 8
+    threshold: 1e-4
+    threshold_mode: 'rel'
+    cooldown: 5
+    min_lr: 1e-8
+    verbose: True
+  evaluator:
+    kwargs:
+      lmds_kwargs:
+        adapt_ts: 0.3
+  visualiser:
+    down_ratio: 4
+  debug_visualiser: null
+
+model:
+  # The runscript sets this to the Phase-8 b4_seed42 checkpoint via
+  #   model.load_from=best_models/phase8/b4_seed42/best_model.pth
+  # so every N-size run starts from the same warm-start anchor.
+  load_from: null
+  resume_from: null
+  kwargs:
+    pretrained: True
+    down_ratio: 4
+    backbone_size: tiny
+
+hydra:
+  run:
+    dir: ./output/phase13_default/${now:%Y-%m-%d}/${now:%H-%M-%S}

@@ -1,0 +1,62 @@
+# HerdNet active-learning al_v7 — BASE backbone training container.
+#
+# Same data + recipe as Dockerfile.al_v7 but with ConvNeXtV2 base (88M params,
+# 3× tiny's 28M). No tiny-shaped warm-start applies; uses ImageNet pretrained
+# backbone only. Halved batch + LR to fit base on the 80GB GPU.
+#
+# Inside the image:
+#   /app/data/train/...   /app/data/val/...   (al_v7 split, identical to herdnet-al-v7)
+#
+# Override via `docker run -e`.
+FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
+
+LABEL maintainer="christian.winkelmann@gmail.com"
+LABEL description="HerdNet al_v7 — ConvNeXtV2 BASE (88M), post iter-v2 merge"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    LC_NUMERIC=C \
+    DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git tini libgl1 libglib2.0-0 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY pyproject.toml /app/
+RUN pip install --upgrade pip setuptools wheel
+
+COPY animaloc /app/animaloc/
+RUN pip install -e ".[tracking]"
+
+COPY configs /app/configs/
+COPY tools   /app/tools/
+
+# al_v7 dataset (staged by docker/build_al_v7_base.sh):
+COPY data /app/data/
+
+COPY docker/al_v7_base_entrypoint.sh /app/docker/
+COPY docker/upload_model.py          /app/docker/
+RUN chmod +x /app/docker/al_v7_base_entrypoint.sh
+
+# Defaults — base backbone, halved batch + LR vs tiny variant.
+ENV SEED=42 \
+    WANDB_PROJECT=hn_active_learning \
+    WANDB_FLAG=True \
+    WANDB_RUN=al_v7_base_seed42_balanced \
+    BACKBONE_SIZE=base \
+    BATCH_SIZE=16 \
+    NUM_WORKERS=24 \
+    AUG_MULT=10 \
+    EPOCHS=10 \
+    LR=3.2e-4 \
+    EMP_PROB=0.20 \
+    VALIDATE_ON=f2_score \
+    ADAPT_TS=0.20 \
+    SCORE_THRESHOLD=0.30 \
+    UPLOAD_MODEL=1
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/docker/al_v7_base_entrypoint.sh"]

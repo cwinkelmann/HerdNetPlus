@@ -71,6 +71,7 @@ class Trainer:
         min_delta: float = 0.0,
         restore_best_weights: bool = True,
         wandb_artifact_upload: bool = False,
+        ema_decay: Optional[float] = None,
 
         ) -> None:
         '''
@@ -162,7 +163,22 @@ class Trainer:
         
         self.device = torch.device(device_name)
 
+        # AMP (Automatic Mixed Precision) for faster training on CUDA
+        self.use_amp = self.device.type == 'cuda'
+        self.scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp)
+
         self.model = model.to(self.device)
+
+        # Optional Exponential Moving Average of the model weights.
+        # When enabled, validation runs against the EMA copy and best_model.pth
+        # stores EMA state so downstream tools (infer, ensemble_infer) load it
+        # without code changes.
+        self.ema = None
+        if ema_decay is not None:
+            from animaloc.models.utils import ModelEMA
+            self.ema = ModelEMA(self.model, decay=float(ema_decay))
+            logger.info(f"EMA enabled (decay_max={float(ema_decay):.4f})")
+
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
         self.val_loss_dataloader = val_loss_dataloader
@@ -329,6 +345,25 @@ class Trainer:
 
                     logger.info(f'{self.evaluator.header} {validate_on}: {val_output:.4f}')
 
+                    # Log aggregated validation metrics as a structured line for easy parsing
+                    _m = self.evaluator.metrics
+                    _tp = sum(_m.tp)
+                    _fn = sum(_m.fn)
+                    _fp = sum(_m.fp)
+                    logger.info(
+                        f'[METRICS] - Epoch: [{epoch}] '
+                        f'f1={_m.fbeta_score(c=1, beta=1):.4f} '
+                        f'f2={_m.fbeta_score(c=1, beta=2):.4f} '
+                        f'f5={_m.fbeta_score(c=1, beta=5):.4f} '
+                        f'recall={_m.recall():.4f} '
+                        f'precision={_m.precision():.4f} '
+                        f'mae={_m.mae():.2f} '
+                        f'me={_m.me():.2f} '
+                        f'rmse={_m.rmse():.2f} '
+                        f'tp={_tp} fn={_fn} fp={_fp} '
+                        f'avg_score={_m.avg_score():.4f}'
+                    )
+
                     if wandb_flag:
                         wandb.log({
                             validate_on: val_output,
@@ -443,6 +478,23 @@ class Trainer:
                     model_checkpoint_path = self._save_checkpoint(epoch, checkpoints)
                     logger.info(
                         f'Best model by End User Metric {validate_on} saved - Epoch {epoch} - Validation value: {val_output:.6f}, path: {model_checkpoint_path}')
+                    _m = self.evaluator.metrics
+                    _tp = sum(_m.tp)
+                    _fn = sum(_m.fn)
+                    _fp = sum(_m.fp)
+                    logger.info(
+                        f'[BEST_METRICS] - Epoch: [{epoch}] '
+                        f'f1={_m.fbeta_score(c=1, beta=1):.4f} '
+                        f'f2={_m.fbeta_score(c=1, beta=2):.4f} '
+                        f'f5={_m.fbeta_score(c=1, beta=5):.4f} '
+                        f'recall={_m.recall():.4f} '
+                        f'precision={_m.precision():.4f} '
+                        f'mae={_m.mae():.2f} '
+                        f'me={_m.me():.2f} '
+                        f'rmse={_m.rmse():.2f} '
+                        f'tp={_tp} fn={_fn} fp={_fp} '
+                        f'avg_score={_m.avg_score():.4f}'
+                    )
                     if self.wandb_artifact_upload:
                         artifact = wandb.Artifact(name=checkpoints, type="model")
                         artifact.add_file(model_checkpoint_path)  # Add a file
@@ -545,27 +597,35 @@ class Trainer:
         return self.model
 
     def _early_stopping_check(self, current_val: float, mode: str, epoch: int) -> bool:
-        ''' Check if early stopping criteria is met '''
+        ''' Check if early stopping criteria is met.
+
+        NOTE: This function does NOT mutate self.best_val — _is_best() owns
+        that state. Previously it did, which caused a subtle collision:
+        with early-stopping enabled, this hook fired first and set
+        self.best_val = current_val, so the subsequent self._is_best()
+        check at the caller saw current_val == best_val and returned False.
+        Result: best_model.pth was never written when early-stopping was
+        active. self.best_val is updated by _is_best() (called immediately
+        after this function), which now also honours self.min_delta so the
+        two checks agree on what counts as an improvement.
+        '''
         logger.info(f"Check if early stopping criteria is met")
         if mode == 'min':
-            # For minimization (e.g., loss)
-            if current_val < (self.best_val - self.min_delta):
-                self.best_val = current_val
-                self.wait = 0
-                if self.restore_best_weights:
-                    self.best_weights = self.model.state_dict().copy()
-            else:
-                self.wait += 1
-
+            improved = current_val < (self.best_val - self.min_delta)
         elif mode == 'max':
-            # For maximization (e.g., accuracy)
-            if current_val > (self.best_val + self.min_delta):
-                self.best_val = current_val
-                self.wait = 0
-                if self.restore_best_weights:
-                    self.best_weights = self.model.state_dict().copy()
-            else:
-                self.wait += 1
+            improved = current_val > (self.best_val + self.min_delta)
+        else:
+            improved = False
+
+        if improved:
+            self.wait = 0
+            if self.restore_best_weights:
+                # Snapshot EMA state when EMA is enabled — best_model.pth
+                # should reflect the model used for validation.
+                snapshot_src = self.ema.module if self.ema is not None else self.model
+                self.best_weights = snapshot_src.state_dict().copy()
+        else:
+            self.wait += 1
 
         # Check if patience is exceeded
         if self.wait >= self.patience:
@@ -789,14 +849,17 @@ class Trainer:
                 )
 
         batches_losses = []
+        nan_skip_count = 0
+        max_consecutive_nan_skips = 50
 
         for images, targets in self.train_logger.log_every(self.train_dataloader, self.print_freq, header):
 
             images, targets = self.prepare_data(images, targets)
 
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
 
-            loss_dict = self.model(images, targets)
+            with torch.amp.autocast('cuda', enabled=self.use_amp):
+                loss_dict = self.model(images, targets)
 
             if wandb_flag:
                 wandb.log(loss_dict)
@@ -810,16 +873,33 @@ class Trainer:
             loss_value = losses_reduced.item()
 
             if not math.isfinite(loss_value):
-                logger.info("Loss is {}, stopping training".format(loss_value))
-                logger.info(loss_dict_reduced)
-                sys.exit(1)
+                nan_skip_count += 1
+                logger.warning(
+                    f"Non-finite loss ({loss_value}) at epoch {epoch} "
+                    f"(consecutive #{nan_skip_count}/{max_consecutive_nan_skips}); "
+                    f"skipping batch. loss_dict={loss_dict_reduced}"
+                )
+                if nan_skip_count >= max_consecutive_nan_skips:
+                    logger.error(
+                        f"Aborting: {max_consecutive_nan_skips} consecutive non-finite "
+                        f"losses — model has diverged."
+                    )
+                    sys.exit(1)
+                continue
+            nan_skip_count = 0
 
-            self.losses.backward()
+            self.scaler.scale(self.losses).backward()
 
             # Clip gradients to prevent explosions in the Transformer head
+            self.scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
 
-            self.optimizer.step()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+
+            # Update EMA shadow weights after every successful optimizer step.
+            if self.ema is not None:
+                self.ema.update(self.model)
 
             if self.adaloss is not None:
                 self.adaloss.feed(self.losses)
@@ -869,27 +949,33 @@ class Trainer:
         ''' Evaluate the epoch model '''
 
         if self.evaluator is not None:
-            self.evaluator.model = self.model
+            # Use EMA shadow for validation when enabled — that's the model
+            # whose state we'll snapshot as best_model.pth.
+            self.evaluator.model = self.ema.module if self.ema is not None else self.model
             self.evaluator.logs_filename = filename
             self.evaluator.header = '[{}] - Epoch: [{}]'.format(filename.upper(),epoch)
             self.evaluator.current_epoch = epoch
     
     def _is_best(self, val_output: float, mode: str = 'min') -> bool:
-        ''' Method to determine the best model for saving checkpoint '''
-        
+        ''' Method to determine the best model for saving checkpoint.
+
+        Honours self.min_delta so the save threshold matches the
+        early-stopping improvement threshold (set by
+        early_stopping_min_delta). When min_delta=0 (the default for
+        runs that don't configure early stopping) this reduces to a
+        strict > / < comparison — backwards compatible.
+        '''
         if mode == 'min':
-            if val_output < self.best_val:
+            if val_output < (self.best_val - self.min_delta):
                 self.best_val = val_output
                 return True
-            else:
-                return False
-        
-        elif mode =='max':
-            if val_output > self.best_val:
+            return False
+
+        elif mode == 'max':
+            if val_output > (self.best_val + self.min_delta):
                 self.best_val = val_output
                 return True
-            else:
-                return False
+            return False
 
     def _is_best_loss(self, val_output: float) -> bool:
         ''' Method to determine the best model for saving checkpoint '''
@@ -917,9 +1003,16 @@ class Trainer:
         else:
             raise ValueError("wrong mode, should be 'all', 'best', 'best_loss','latest'")
 
+        # When EMA is enabled, persist the shadow weights as the canonical
+        # checkpoint state — downstream tools load `model_state_dict` and
+        # should see the EMA snapshot, not the raw fast-tracking model.
+        save_state = (
+            self.ema.module.state_dict() if self.ema is not None
+            else self.model.state_dict()
+        )
         torch.save({
             'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': save_state,
             'optimizer_state_dict': self.optimizer.state_dict(),
             'loss': self.losses ,
             'best_val': self.best_val,
@@ -1017,6 +1110,8 @@ class P2PNetTrainer(Trainer):
             )
 
         batches_losses = []
+        nan_skip_count = 0
+        max_consecutive_nan_skips = 50
 
         for images, targets in self.train_logger.log_every(self.train_dataloader, self.print_freq, header):
 
@@ -1037,12 +1132,23 @@ class P2PNetTrainer(Trainer):
             batches_losses.append(self.losses.detach())
 
 
-            loss_value = self.losses.detach()
+            loss_value = self.losses.detach().item()
 
             if not math.isfinite(loss_value):
-                logger.info("Loss is {}, stopping training".format(loss_value))
-                logger.info(self.losses.detach())
-                sys.exit(1)
+                nan_skip_count += 1
+                logger.warning(
+                    f"Non-finite loss ({loss_value}) at epoch {epoch} "
+                    f"(consecutive #{nan_skip_count}/{max_consecutive_nan_skips}); "
+                    f"skipping batch. loss_dict={loss_dict}"
+                )
+                if nan_skip_count >= max_consecutive_nan_skips:
+                    logger.error(
+                        f"Aborting: {max_consecutive_nan_skips} consecutive non-finite "
+                        f"losses — model has diverged."
+                    )
+                    sys.exit(1)
+                continue
+            nan_skip_count = 0
 
             self.losses.backward()
 

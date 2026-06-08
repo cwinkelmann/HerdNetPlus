@@ -1,0 +1,76 @@
+# Phase 14b — B3 (CamouflageHerdNetConvNeXt) variant of the recovery recipe.
+# See phase14b_ensemble_b4.yaml for full rationale.
+
+defaults:
+  - /losses: herdnet_fmo03
+  - /datasets: data_scaling
+  - /training_settings: evaluator
+  - /model: HerdNetTimmConvNext_Camouflaged
+  - _self_
+
+wandb_flag: True
+seed: 42
+device_name: null
+wandb_project: 'hn_phase14b_ensemble'
+wandb_entity: 'karisu'
+wandb_run: 'phase14b_b3_default'
+wandb_tags: ['phase14b', 'ensemble', 'b3', 'f2_recipe']
+wandb_notes: |
+  Phase 14b ensemble member — B3 (CamouflageHerdNetConvNeXt).
+  Same f2_recipe as phase14b_ensemble_b4.yaml — only the architecture differs.
+
+datasets:
+  num_classes: 2
+  class_def:
+    1: 'iguana'
+  train:
+    augmentation_multiplier: 1
+
+losses:
+  CrossEntropyLoss:
+    kwargs:
+      weight:
+        - ${losses.CrossEntropyLoss.background_class_weight}
+        - 3.0
+
+training_settings:
+  lr: 8.0e-05
+  epochs: 10
+  batch_size: 8
+  num_workers: 16
+  warmup_iters: 500
+  valid_freq: 1
+  print_freq: 20
+  early_stopping: True
+  early_stopping_patience: 3
+  early_stopping_min_delta: 0.005
+  early_stopping_restore_best_weights: True
+  auto_lr:
+    mode: 'max'
+    patience: 4
+    threshold: 1e-4
+    threshold_mode: 'rel'
+    cooldown: 2
+    min_lr: 1e-8
+    verbose: True
+  evaluator:
+    select_mode: 'max'
+    validate_on: 'f2_score'
+    kwargs:
+      lmds_kwargs:
+        adapt_ts: 0.30
+  visualiser:
+    down_ratio: 4
+  debug_visualiser: null
+
+model:
+  load_from: null
+  resume_from: null
+  kwargs:
+    pretrained: True
+    down_ratio: 4
+    backbone_size: tiny
+
+hydra:
+  run:
+    dir: ./output/phase14b_b3_default/${now:%Y-%m-%d}/${now:%H-%M-%S}

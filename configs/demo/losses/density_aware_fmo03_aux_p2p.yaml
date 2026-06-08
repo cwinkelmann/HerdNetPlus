@@ -1,0 +1,67 @@
+# V3 losses: DensityAware + CE + Aux deep supervision + P2P auxiliary
+
+DensityAwareHerdNetLoss:
+  print_name: 'density_focal_loss'
+  from_torch: False
+  output_idx: 0
+  target_idx: 0
+  lambda_const: 1.0
+  kwargs:
+    alpha: 2
+    beta: 4
+    density_radius: 100
+    min_weight: 0.5
+    max_weight: 3.0
+    density_scale: 'inverse_sqrt'
+
+CrossEntropyLoss:
+  print_name: 'ce_loss'
+  from_torch: True
+  output_idx: 1
+  target_idx: 1
+  lambda_const: 1.0
+  background_class_weight: 0.1
+  kwargs:
+    reduction: 'mean'
+    weight:
+      - ${losses.CrossEntropyLoss.background_class_weight}
+      - 5.0
+
+FocalLoss_aux_p3:
+  print_name: 'aux_p3_loss'
+  from_torch: False
+  output_idx: 2
+  target_idx: 0
+  lambda_const: 0.3
+  kwargs:
+    alpha: 2
+    beta: 4
+    reduction: 'mean'
+    normalize: False
+
+FocalLoss_aux_p4:
+  print_name: 'aux_p4_loss'
+  from_torch: False
+  output_idx: 3
+  target_idx: 0
+  lambda_const: 0.1
+  kwargs:
+    alpha: 2
+    beta: 4
+    reduction: 'mean'
+    normalize: False
+
+# P2P auxiliary loss — reads stored P2P output from model, extracts GT from FIDT heatmap
+P2PLossAdapter:
+  print_name: 'p2p_loss'
+  from_torch: False
+  output_idx: 0
+  target_idx: 0
+  lambda_const: 0.2
+  kwargs:
+    cost_class: 2.0
+    cost_point: 5.0
+    cls_weight: 1.0
+    reg_weight: 5.0
+    image_size: 512
+    peak_threshold: 0.5

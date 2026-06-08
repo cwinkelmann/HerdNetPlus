@@ -1,0 +1,68 @@
+# Phase 14c — B3 variant of the F1 recipe. See phase14c_ensemble_b4.yaml.
+
+defaults:
+  - /losses: herdnet_fmo03
+  - /datasets: data_scaling
+  - /training_settings: evaluator
+  - /model: HerdNetTimmConvNext_Camouflaged
+  - _self_
+
+wandb_flag: True
+seed: 42
+device_name: null
+wandb_project: 'hn_phase14c_ensemble'
+wandb_entity: 'karisu'
+wandb_run: 'phase14c_b3_default'
+wandb_tags: ['phase14c', 'ensemble', 'b3', 'f1_recipe']
+wandb_notes: |
+  Phase 14c ensemble member — B3 (CamouflageHerdNetConvNeXt).
+  F1-recipe (Phase-8 style) — see phase14c_ensemble_b4.yaml for full rationale.
+
+datasets:
+  num_classes: 2
+  class_def:
+    1: 'iguana'
+  train:
+    augmentation_multiplier: 1
+
+training_settings:
+  lr: 8.0e-05
+  epochs: 10
+  batch_size: 8
+  num_workers: 16
+  warmup_iters: 500
+  valid_freq: 1
+  print_freq: 20
+  early_stopping: True
+  early_stopping_patience: 3
+  early_stopping_min_delta: 0.005
+  early_stopping_restore_best_weights: True
+  auto_lr:
+    mode: 'max'
+    patience: 4
+    threshold: 1e-4
+    threshold_mode: 'rel'
+    cooldown: 2
+    min_lr: 1e-8
+    verbose: True
+  evaluator:
+    select_mode: 'max'
+    validate_on: 'f1_score'
+    kwargs:
+      lmds_kwargs:
+        adapt_ts: 0.30
+  visualiser:
+    down_ratio: 4
+  debug_visualiser: null
+
+model:
+  load_from: null
+  resume_from: null
+  kwargs:
+    pretrained: True
+    down_ratio: 4
+    backbone_size: tiny
+
+hydra:
+  run:
+    dir: ./output/phase14c_b3_default/${now:%Y-%m-%d}/${now:%H-%M-%S}

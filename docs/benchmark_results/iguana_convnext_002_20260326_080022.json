@@ -1,0 +1,30 @@
+{
+  "trial_id": "iguana_convnext_002_20260326_080022",
+  "status": "failed",
+  "config_name": "convnext_camouflaged",
+  "overrides": [
+    "datasets.num_classes=3",
+    "++datasets.class_def={1: iguana, 2: hard_negative}",
+    "losses=herdnet_iguana",
+    "training_settings.batch_size=8",
+    "training_settings.warmup_iters=500",
+    "model.load_from=null",
+    "model.kwargs.down_ratio=4",
+    "model.kwargs.backbone_size=base",
+    "training_settings.lr=1e-05",
+    "training_settings.optimizer=adamW",
+    "datasets.train.csv_file=/home/christian/hnee/HerdNet/data_iguana_corr/train_patches/gt.csv",
+    "datasets.train.root_dir=/home/christian/hnee/HerdNet/data_iguana_corr/train_patches",
+    "datasets.validate.csv_file=/home/christian/hnee/HerdNet/data_iguana_corr/val_patches/gt.csv",
+    "datasets.validate.root_dir=/home/christian/hnee/HerdNet/data_iguana_corr/val_patches",
+    "training_settings.epochs=20",
+    "wandb_flag=False",
+    "model.load_from=null",
+    "hydra.run.dir=benchmark_results/iguana_convnext_002_20260326_080022"
+  ],
+  "git_commit": "a33ff07",
+  "timestamp": "2026-03-26T08:00:22.993461",
+  "metrics": {},
+  "error": "ReduceLROnPlateau.__init__() got an unexpected keyword argument 'verbose'",
+  "training_time_seconds": 2.5
+}

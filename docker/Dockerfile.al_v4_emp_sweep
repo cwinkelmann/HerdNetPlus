@@ -1,0 +1,64 @@
+# HerdNet active-learning iter-4 empty_probability sweep container.
+#
+# Sequentially trains a B4 ConvNeXtV2 with several values of
+# ObjectAwareRandomCrop.empty_probability so we can compare how much
+# the vegetation-FP problem responds to this knob.
+#
+# Inside the image:
+#   /app/data/train/Default/ + /app/data/train/herdnet_format.csv    (al_v4 split)
+#   /app/data/val/Default/   + /app/data/val/herdnet_format.csv      (al_v4 val)
+#   /app/best_models/phase8/b4_seed42/best_model.pth                 (warm-start)
+#
+# Defaults sized for a single 80 GB GPU. Override via `docker run -e`.
+FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
+
+LABEL maintainer="christian.winkelmann@gmail.com"
+LABEL description="HerdNet al_v4 empty_probability sweep — non-Fernandina+iter2 corrected"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    LC_NUMERIC=C \
+    DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git tini libgl1 libglib2.0-0 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY pyproject.toml /app/
+RUN pip install --upgrade pip setuptools wheel
+
+COPY animaloc /app/animaloc/
+RUN pip install -e ".[tracking]"
+
+COPY configs /app/configs/
+COPY tools   /app/tools/
+
+# Warm-start checkpoint
+COPY best_models /app/best_models/
+
+# al_v4 dataset (staged by docker/build_al_v4_emp_sweep.sh):
+COPY data /app/data/
+
+COPY docker/al_v4_emp_sweep_entrypoint.sh /app/docker/
+COPY docker/upload_model.py               /app/docker/
+RUN chmod +x /app/docker/al_v4_emp_sweep_entrypoint.sh
+
+# Sweep + training defaults. Comma-separated EMP_VALUES.
+ENV SEED=42 \
+    WANDB_PROJECT=hn_active_learning \
+    WANDB_FLAG=True \
+    EMP_VALUES="0.05,0.10,0.20,0.30,0.50" \
+    BATCH_SIZE=32 \
+    NUM_WORKERS=24 \
+    AUG_MULT=10 \
+    EPOCHS=10 \
+    LR=6.4e-4 \
+    VALIDATE_ON=f5_score \
+    ADAPT_TS=0.15 \
+    UPLOAD_MODEL=1
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/docker/al_v4_emp_sweep_entrypoint.sh"]

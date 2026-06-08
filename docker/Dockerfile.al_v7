@@ -1,0 +1,66 @@
+# HerdNet active-learning al_v7 training container (post iter-v2 merge).
+#
+# Single B4 ConvNeXtV2 training run with balanced f2_score selection
+# and the post-iter-v2-merge master. Sized for a single 80 GB GPU
+# (BATCH_SIZE=32, NUM_WORKERS=24, LR=6.4e-4 ~ linear scale of local 8e-5@4).
+#
+# Inside the image:
+#   /app/data/train/Default/ + /app/data/train/herdnet_format.csv     (al_v7 train, 5,658 imgs)
+#   /app/data/val/Default/   + /app/data/val/herdnet_format.csv       (al_v7 val,  610 imgs)
+#   /app/best_models/phase8/b4_seed42/best_model.pth                  (warm-start)
+#
+# Override via `docker run -e`.
+FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
+
+LABEL maintainer="christian.winkelmann@gmail.com"
+LABEL description="HerdNet al_v7 — post iter-v2 merge, balanced f2_score, Espanola+Floreana val"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    LC_NUMERIC=C \
+    DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git tini libgl1 libglib2.0-0 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY pyproject.toml /app/
+RUN pip install --upgrade pip setuptools wheel
+
+COPY animaloc /app/animaloc/
+RUN pip install -e ".[tracking]"
+
+COPY configs /app/configs/
+COPY tools   /app/tools/
+
+# Warm-start checkpoint
+COPY best_models /app/best_models/
+
+# al_v7 dataset (staged by docker/build_al_v7.sh):
+COPY data /app/data/
+
+COPY docker/al_v7_entrypoint.sh /app/docker/
+COPY docker/upload_model.py     /app/docker/
+RUN chmod +x /app/docker/al_v7_entrypoint.sh
+
+# Training defaults sized for a single 80 GB GPU.
+ENV SEED=42 \
+    WANDB_PROJECT=hn_active_learning \
+    WANDB_FLAG=True \
+    WANDB_RUN=al_v7_b4_seed42_balanced \
+    BATCH_SIZE=32 \
+    NUM_WORKERS=24 \
+    AUG_MULT=10 \
+    EPOCHS=10 \
+    LR=6.4e-4 \
+    EMP_PROB=0.20 \
+    VALIDATE_ON=f2_score \
+    ADAPT_TS=0.20 \
+    SCORE_THRESHOLD=0.30 \
+    UPLOAD_MODEL=1
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/docker/al_v7_entrypoint.sh"]

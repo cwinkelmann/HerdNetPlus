@@ -175,17 +175,48 @@ from albumentations import DualTransform
 
 class ObjectAwareRandomCrop(DualTransform):
     """
-    Random crop that ensures at least one keypoint is included with a minimum distance from edges.
+    Random crop that ensures at least one keypoint is included, with stitch-aware positioning.
 
-    This transformation selects a random keypoint and positions the crop such that the keypoint
-    is at least `min_edge_distance` pixels away from all crop edges.
+    Designed for training models that will run inference with a sliding-window stitcher.
+    The crop position is chosen so the selected keypoint can land anywhere in the crop —
+    including near edges — matching the distribution the model will see during tiled inference.
+
+    Why translation diversity matters: HerdNet runs inference in fixed 512x512 tiles at
+    stride=392. If training crops over-represent any sub-tile position (especially the
+    centre), the model learns a position prior tied to that location and at inference
+    only fires when the stitcher's grid happens to align an iguana there. With 80% drone
+    overlap, that grid alignment varies randomly across consecutive frames, producing
+    erratic detection patterns. See investigation in
+    `metashape_mosaicing/tests/center_bias_proof.png`.
+
+    With the recommended defaults (`min_edge_distance=0`, `translation_jitter=0`) the
+    selected keypoint is uniformly distributed in the crop — that's the right setting
+    for stitcher compatibility. Use `translation_jitter` to add extra position noise
+    on top, which is robust to subtle centre-bias paths in callers that pass
+    `min_edge_distance > 0`.
 
     Args:
         height (int): Height of the crop.
         width (int): Width of the crop.
-        min_edge_distance (int): Minimum distance in pixels between THE SELECTED keypoint and crop edge. Default: 10.
-        empty_probability (float): Probability of creating a crop without any keypoints. Default: 0.0.
-        max_attempts (int): Maximum attempts to find a valid crop with min_edge_distance. Default: 10.
+        min_edge_distance (int): Minimum distance in pixels between THE SELECTED keypoint and
+            crop edge. Set to 0 for uniform placement (recommended for stitcher compatibility).
+            Default: 0.
+        empty_probability (float): Probability of creating a crop without any keypoints
+            (pure background). Default: 0.0.
+        edge_probability (float): Probability of deliberately placing the selected keypoint
+            in the edge zone (within `edge_zone` pixels of the crop border). This trains the
+            model to be confident at tile boundaries during stitched inference. Default: 0.0.
+        edge_zone (int): Width of the edge zone in pixels. Should match the stitcher overlap
+            (e.g. 120px for overlap=120). Only used when edge_probability > 0. Default: 120.
+        max_attempts (int): Maximum attempts to find a valid crop. Default: 10.
+        translation_jitter (int): After picking a crop position, perturb it by a uniform
+            integer in [-translation_jitter, +translation_jitter] on each axis. Clamped to
+            keep ≥1 keypoint inside the crop and the crop inside the image. Defaults to 0
+            (no extra jitter). Setting this to ~stride/2 of your inference stitcher
+            (e.g. 196 for the iguana config's stride=392) explicitly randomises the
+            sub-tile position so the model can't latch onto any particular position prior.
+            Recommended when min_edge_distance > 0 or when retraining a model that's
+            shown centre-fixation pathology at inference.
         always_apply (bool): Whether to always apply this transform. Default: False.
         p (float): Probability of applying the transform. Default: 1.0.
     """
@@ -194,25 +225,61 @@ class ObjectAwareRandomCrop(DualTransform):
             self,
             height: int,
             width: int,
-            min_edge_distance: int = 10,
+            min_edge_distance: int = 0,
             empty_probability: float = 0.0,
+            edge_probability: float = 0.0,
+            edge_zone: int = 120,
             max_attempts: int = 10,
+            translation_jitter: int = 0,
+            hard_negative_probability: float = 0.0,
+            hard_negative_label: int = 2,
             always_apply: bool = False,
             p: float = 1.0,
     ):
-        super().__init__(always_apply, p)
+        super().__init__(p=p)
         self.height = height
         self.width = width
         self.min_edge_distance = min_edge_distance
         self.empty_probability = empty_probability
+        self.edge_probability = edge_probability
+        self.edge_zone = edge_zone
         self.max_attempts = max_attempts
+        # translation_jitter: after picking a crop position, perturb it by a
+        # uniform integer in [-translation_jitter, +translation_jitter] on
+        # each axis (still clamped so the keypoint stays in the crop).
+        # Set this to ~stride/2 of your inference stitcher (~196 for the
+        # iguana config) to break any residual centre-bias the model might
+        # otherwise learn from per-image position correlations.
+        self.translation_jitter = translation_jitter
+        # hard_negative_probability: probability of anchoring the crop on a
+        # confirmed hard-negative (vegetation FP) keypoint instead of a
+        # foreground keypoint. Hard-negatives are identified by the
+        # `labels` field in albumentations' label_fields passthrough; a
+        # keypoint with `labels == hard_negative_label` (default 2) is
+        # treated as a hard-negative anchor. CSVDataset is expected to
+        # strip these from the target before the loss is computed, so the
+        # crop becomes an "informative empty" with the model forced to
+        # see vegetation patterns it has been wrong about.
+        self.hard_negative_probability = hard_negative_probability
+        self.hard_negative_label = hard_negative_label
 
         if self.min_edge_distance < 0:
             raise ValueError("min_edge_distance must be non-negative")
         if not 0.0 <= self.empty_probability <= 1.0:
             raise ValueError("empty_probability must be between 0.0 and 1.0")
+        if not 0.0 <= self.edge_probability <= 1.0:
+            raise ValueError("edge_probability must be between 0.0 and 1.0")
+        if not 0.0 <= self.hard_negative_probability <= 1.0:
+            raise ValueError("hard_negative_probability must be between 0.0 and 1.0")
+        if self.empty_probability + self.hard_negative_probability > 1.0:
+            raise ValueError(
+                "empty_probability + hard_negative_probability must be ≤ 1.0; "
+                f"got {self.empty_probability} + {self.hard_negative_probability}"
+            )
         if self.max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
+        if self.translation_jitter < 0:
+            raise ValueError("translation_jitter must be non-negative")
 
     def _is_keypoint_valid_for_crop(
             self,
@@ -327,6 +394,52 @@ class ObjectAwareRandomCrop(DualTransform):
 
         return is_valid, min_dist
 
+    def _get_edge_crop_position(
+            self,
+            keypoint_x: float,
+            keypoint_y: float,
+            image_height: int,
+            image_width: int
+    ) -> Tuple[int, int]:
+        """
+        Position the crop so the keypoint lands in the edge zone (within self.edge_zone
+        pixels of the crop border). This simulates what the model sees at tile boundaries
+        during stitched inference.
+        """
+        # Pick a random edge: 0=left, 1=right, 2=top, 3=bottom
+        edge = random.randint(0, 3)
+        ez = self.edge_zone
+
+        if edge == 0:  # keypoint near LEFT edge of crop: kp_x_in_crop in [0, ez)
+            # crop_x such that keypoint_x - crop_x is in [0, ez)
+            crop_x_min = max(0, int(keypoint_x - ez + 1))
+            crop_x_max = min(image_width - self.width, int(keypoint_x))
+        elif edge == 1:  # keypoint near RIGHT edge
+            crop_x_min = max(0, int(keypoint_x - self.width + 1))
+            crop_x_max = min(image_width - self.width, int(keypoint_x - self.width + ez))
+        else:
+            # For top/bottom edges, x is unconstrained (just keep keypoint in crop)
+            crop_x_min = max(0, int(keypoint_x - self.width + 1))
+            crop_x_max = min(image_width - self.width, int(keypoint_x))
+
+        if edge == 2:  # keypoint near TOP edge
+            crop_y_min = max(0, int(keypoint_y - ez + 1))
+            crop_y_max = min(image_height - self.height, int(keypoint_y))
+        elif edge == 3:  # keypoint near BOTTOM edge
+            crop_y_min = max(0, int(keypoint_y - self.height + 1))
+            crop_y_max = min(image_height - self.height, int(keypoint_y - self.height + ez))
+        else:
+            crop_y_min = max(0, int(keypoint_y - self.height + 1))
+            crop_y_max = min(image_height - self.height, int(keypoint_y))
+
+        if crop_x_min > crop_x_max or crop_y_min > crop_y_max:
+            # Fallback: just include the keypoint anywhere
+            crop_x = max(0, min(int(keypoint_x - self.width // 2), image_width - self.width))
+            crop_y = max(0, min(int(keypoint_y - self.height // 2), image_height - self.height))
+            return crop_x, crop_y
+
+        return random.randint(crop_x_min, crop_x_max), random.randint(crop_y_min, crop_y_max)
+
     def _get_crop_with_keypoint(
             self,
             keypoint_coords: List[Tuple[float, float]],
@@ -334,23 +447,30 @@ class ObjectAwareRandomCrop(DualTransform):
             image_width: int
     ) -> Tuple[int, int]:
         """
-        Get a crop position that includes a random keypoint with min edge distance.
+        Get a crop position that includes a random keypoint.
 
-        Returns:
-            Tuple of (crop_x, crop_y)
+        With edge_probability > 0, sometimes places the keypoint in the edge zone
+        to train the model for stitcher tile boundaries.
         """
         # Shuffle keypoints to try them in random order
         available_keypoints = keypoint_coords.copy()
         random.shuffle(available_keypoints)
 
+        # Decide if this crop should have the keypoint in the edge zone
+        force_edge = random.random() < self.edge_probability
+
         # Try to find a valid keypoint and crop position
         for attempt in range(min(int(self.max_attempts), len(available_keypoints) * 2)):
-            # Select keypoint (cycle through if needed)
             target_x, target_y = available_keypoints[attempt % len(available_keypoints)]
+
+            if force_edge:
+                crop_x, crop_y = self._get_edge_crop_position(
+                    target_x, target_y, image_height, image_width
+                )
+                return crop_x, crop_y
 
             # Check if this keypoint can possibly satisfy the constraint
             if not self._is_keypoint_valid_for_crop(target_x, target_y, image_height, image_width):
-                # Try another keypoint
                 continue
 
             # Get valid crop ranges
@@ -358,35 +478,28 @@ class ObjectAwareRandomCrop(DualTransform):
                 target_x, target_y, image_height, image_width
             )
 
-            # Check if valid crop is possible
             if x_min <= x_max and y_min <= y_max:
-                # Random position within valid range
                 crop_x = random.randint(x_min, x_max)
                 crop_y = random.randint(y_min, y_max)
 
-                # Verify the constraint is satisfied for the selected keypoint
                 is_valid, min_dist = self._verify_crop_constraint(target_x, target_y, crop_x, crop_y)
-
                 if is_valid:
                     return crop_x, crop_y
 
-        # If we couldn't find a valid crop after max_attempts, use best-effort
-        # This happens when all keypoints are too close to image edges
-        # warnings.warn(
-        #     f"Could not find a crop satisfying min_edge_distance={self.min_edge_distance} "
-        #     f"after {self.max_attempts} attempts. Using best-effort crop. "
-        #     f"Consider using a smaller min_edge_distance or larger image/crop size.",
-        #     UserWarning
-        # )
-
-        # Best-effort: select a random keypoint and center on it
+        # Best-effort fallback: pick a UNIFORM crop position that includes a
+        # random keypoint. Previously this centred the crop on the keypoint,
+        # which silently injected a strong "iguana ⇒ centre" prior into the
+        # model and broke translation equivariance at inference (the stitcher
+        # then only fires on iguanas that happen to land near a tile centre,
+        # producing erratic detection across consecutive overlapping drone
+        # frames). See investigation in metashape_mosaicing/tests/.
         target_x, target_y = random.choice(keypoint_coords)
-        crop_x = int(target_x - self.width // 2)
-        crop_y = int(target_y - self.height // 2)
-
-        # Clamp to image bounds
-        crop_x = max(0, min(crop_x, image_width - self.width))
-        crop_y = max(0, min(crop_y, image_height - self.height))
+        x_min = max(0, int(target_x - self.width + 1))
+        x_max = min(image_width - self.width, int(target_x))
+        y_min = max(0, int(target_y - self.height + 1))
+        y_max = min(image_height - self.height, int(target_y))
+        crop_x = random.randint(x_min, x_max) if x_min <= x_max else max(0, min(int(target_x - self.width // 2), image_width - self.width))
+        crop_y = random.randint(y_min, y_max) if y_min <= y_max else max(0, min(int(target_y - self.height // 2), image_height - self.height))
 
         return crop_x, crop_y
 
@@ -394,26 +507,26 @@ class ObjectAwareRandomCrop(DualTransform):
         """Apply the crop to the image."""
         return img[crop_y:crop_y + self.height, crop_x:crop_x + self.width]
 
-    def apply_to_keypoint(
-            self,
-            keypoint: Tuple[float, float, float, float],
-            crop_x: int = 0,
-            crop_y: int = 0,
-            **params
-    ) -> Tuple[float, float, float, float]:
-        """Apply the crop to keypoints."""
-        x, y, angle, scale = keypoint
+    def apply_to_keypoint(self, keypoint, crop_x: int = 0, crop_y: int = 0, **params):
+        """Apply the crop to a single keypoint. Handles variable-length keypoint tuples."""
+        x, y = keypoint[0], keypoint[1]
+        rest = keypoint[2:] if len(keypoint) > 2 else ()
+        return (x - crop_x, y - crop_y, *rest)
 
-        # Adjust keypoint coordinates relative to the crop
-        x_new = x - crop_x
-        y_new = y - crop_y
-
-        return x_new, y_new, angle, scale
-
-    def get_params_dependent_on_targets(self, params: Dict) -> Dict:
-        """Generate parameters for the transformation."""
-        img = params['image']
-        keypoints = params.get('keypoints', [])
+    def get_params_dependent_on_data(self, params: Dict, data: Dict) -> Dict:
+        """Generate crop parameters based on image and keypoints (albumentations v2 API)."""
+        img = data['image']
+        keypoints = data.get('keypoints', [])
+        # In albumentations v2, label_fields registered via KeypointParams are
+        # packed INTO the keypoint tuples (extending them past (x, y)) and
+        # are NOT available as top-level kwargs to the transform. So we read
+        # labels from the keypoint's extra elements (kp[2], kp[3], ...).
+        # Convention: CSVDataset sets KeypointParams(label_fields=['labels', ...]),
+        # so kp[2] is the labels value when label_fields is non-empty.
+        # If no labels available, all keypoints default to "iguana" anchoring.
+        labels = data.get('labels', None)
+        if labels is None and len(keypoints) > 0 and len(keypoints[0]) >= 3:
+            labels = [kp[2] for kp in keypoints]
         image_height, image_width = img.shape[:2]
 
         # Validate crop size
@@ -431,29 +544,100 @@ class ObjectAwareRandomCrop(DualTransform):
                 f"Minimum crop size should be {2 * self.min_edge_distance}x{2 * self.min_edge_distance}"
             )
 
-        # Extract x,y coordinates from keypoints
-        keypoint_coords = [(kp[0], kp[1]) for kp in keypoints]
+        # Split keypoints by class label, when labels are available.
+        # iguana_coords = foreground anchors (label != hard_negative_label).
+        # hard_neg_coords = vegetation anchors (label == hard_negative_label).
+        # If no labels field is passed (older configs), treat every keypoint
+        # as iguana so behaviour is unchanged.
+        if labels is not None and len(labels) == len(keypoints):
+            iguana_coords = [(kp[0], kp[1]) for kp, lab in zip(keypoints, labels)
+                             if int(lab) != self.hard_negative_label]
+            hard_neg_coords = [(kp[0], kp[1]) for kp, lab in zip(keypoints, labels)
+                               if int(lab) == self.hard_negative_label]
+        else:
+            iguana_coords = [(kp[0], kp[1]) for kp in keypoints]
+            hard_neg_coords = []
 
-        # Decide whether to create empty crop or crop with keypoint
-        create_empty_crop = random.random() < self.empty_probability
+        # Three-way decision: hard-negative anchored / random empty / iguana anchored.
+        # H-branch only fires when an H keypoint exists; if it doesn't, the
+        # hnp budget collapses cleanly into the iguana-anchored branch
+        # (NOT into the random-empty branch — H absence shouldn't suddenly
+        # make 25% of crops random).
+        use_hard_negative = (
+            random.random() < self.hard_negative_probability
+            and len(hard_neg_coords) > 0
+        )
+        use_empty = (
+            not use_hard_negative
+            and random.random() < self.empty_probability
+        )
 
-        if not keypoint_coords or create_empty_crop:
-            # No keypoints or intentionally empty crop
+        if use_hard_negative:
+            # Crop anchored on a confirmed vegetation FP — same geometric
+            # logic as iguana-anchored, just a different anchor pool.
+            crop_x, crop_y = self._get_crop_with_keypoint(
+                hard_neg_coords, image_height, image_width
+            )
+        elif use_empty or not iguana_coords:
             crop_x, crop_y = self._get_random_crop_with_empty(image_height, image_width)
         else:
-            # Crop with keypoint at min distance from edges
             crop_x, crop_y = self._get_crop_with_keypoint(
-                keypoint_coords, image_height, image_width
+                iguana_coords, image_height, image_width
             )
+
+        # Optional translation jitter: perturb the chosen crop position
+        # uniformly in [-J, J] on each axis. Keeps any keypoint that was
+        # inside the crop still inside (clamps if necessary), and never
+        # leaves the image. This is the explicit "break the centre bias"
+        # knob -- see CamouflageHerdNetConvNeXt centre-fixation analysis.
+        jitter_anchors = iguana_coords if not use_hard_negative else hard_neg_coords
+        if self.translation_jitter > 0 and jitter_anchors and not use_empty:
+            j = self.translation_jitter
+            dx = random.randint(-j, j)
+            dy = random.randint(-j, j)
+            new_x = max(0, min(crop_x + dx, image_width - self.width))
+            new_y = max(0, min(crop_y + dy, image_height - self.height))
+            # Make sure at least one anchor is still inside the new crop;
+            # if jitter pushed all of them out, keep the original position.
+            kept = any(
+                new_x <= kx < new_x + self.width and new_y <= ky < new_y + self.height
+                for kx, ky in jitter_anchors
+            )
+            if kept:
+                crop_x, crop_y = new_x, new_y
 
         return {'crop_x': crop_x, 'crop_y': crop_y}
 
+    def apply_to_keypoints(self, keypoints, crop_x=0, crop_y=0, **params):
+        """Apply the crop to a list of keypoints (albumentations v2 API)."""
+        result = [self.apply_to_keypoint(kp, crop_x=crop_x, crop_y=crop_y, **params) for kp in keypoints]
+        return np.array(result) if result else np.array([])
+
+    # ------------------------------------------------------------------
+    # Albumentations v1 backward-compatibility shim.
+    # The herdnet conda env ships albumentations 1.0.3, which calls
+    # `get_params_dependent_on_targets(params)` — NOT the v2 hook
+    # `get_params_dependent_on_data(params, data)`. Without these shims
+    # the transform silently became a no-op fixed-position crop on v1,
+    # meaning every batch saw the same crop. The shims forward to the
+    # v2 implementation so behaviour is identical across versions.
+    # ------------------------------------------------------------------
     @property
     def targets_as_params(self) -> List[str]:
+        # 'labels' is intentionally NOT listed: in albumentations v2 it is
+        # packed into keypoint tuples and stripped from kwargs. Listing it
+        # here would trigger a "missing keys" ValueError. The transform
+        # reads labels from keypoint[2] (when available) instead.
         return ['image', 'keypoints']
 
+    def get_params_dependent_on_targets(self, params: Dict) -> Dict:
+        return self.get_params_dependent_on_data(params, params)
+
     def get_transform_init_args_names(self) -> Tuple[str, ...]:
-        return ('height', 'width', 'min_edge_distance', 'empty_probability', 'max_attempts')
+        return ('height', 'width', 'min_edge_distance', 'empty_probability',
+                'edge_probability', 'edge_zone', 'max_attempts',
+                'translation_jitter', 'hard_negative_probability',
+                'hard_negative_label')
 
 # class ObjectAwareRandomCrop(DualTransform):
 #     """
@@ -694,8 +878,8 @@ class PasspartoutAugmentation(DualTransform):
 
         self.mask_cache = None  # to avoid recomputing for same shape
 
-    def get_params_dependent_on_targets(self, params):
-        h, w = params["image"].shape[:2]
+    def get_params_dependent_on_data(self, params, data):
+        h, w = data["image"].shape[:2]
         diag = np.sqrt(h ** 2 + w ** 2)
 
         # Possibly randomize center and radius

@@ -484,7 +484,7 @@ class CamouflageDetectionHead(nn.Module):
 # Main Model - CamouflageHerdNetConvNeXt
 # =============================================================================
 
-#@MODELS.register()
+@MODELS.register()
 class CamouflageHerdNetConvNeXt(nn.Module):
     """
     HerdNet with ConvNeXt backbone enhanced for camouflaged object detection.
@@ -502,6 +502,7 @@ class CamouflageHerdNetConvNeXt(nn.Module):
 
     Args:
         backbone_size: Size of ConvNeXt ('tiny', 'small', 'base')
+        backbone: Backbone family ('convnext', 'convnextv2', 'efficientvit')
         num_classes: Number of classes for classification
         img_size: Input image size
         pretrained: Use ImageNet pretrained weights
@@ -516,9 +517,29 @@ class CamouflageHerdNetConvNeXt(nn.Module):
         enable_debug_mode: Enable debug output in forward pass
     """
 
+    # Backbone configurations: (timm_model_name, [stage_channels])
+    BACKBONE_CONFIGS = {
+        'convnext': {
+            'tiny': ('convnext_tiny.fb_in22k_ft_in1k', [96, 192, 384, 768]),
+            'small': ('convnext_small.fb_in22k_ft_in1k', [96, 192, 384, 768]),
+            'base': ('convnext_base.fb_in22k_ft_in1k', [128, 256, 512, 1024]),
+        },
+        'convnextv2': {
+            'tiny': ('convnextv2_tiny.fcmae_ft_in22k_in1k', [96, 192, 384, 768]),
+            'small': ('convnextv2_small.fcmae_ft_in22k_in1k', [96, 192, 384, 768]),
+            'base': ('convnextv2_base.fcmae_ft_in22k_in1k', [128, 256, 512, 1024]),
+        },
+        'efficientvit': {
+            'tiny': ('efficientvit_b1.r256_in1k', [32, 64, 128, 256]),
+            'small': ('efficientvit_b2.r256_in1k', [48, 96, 192, 384]),
+            'base': ('efficientvit_b3.r256_in1k', [64, 128, 256, 512]),
+        },
+    }
+
     def __init__(
             self,
             backbone_size: str = 'tiny',
+            backbone: str = 'convnext',
             num_classes: int = 2,
             img_size: int = 512,
             pretrained: bool = True,
@@ -536,10 +557,13 @@ class CamouflageHerdNetConvNeXt(nn.Module):
 
         assert backbone_size in ['tiny', 'small', 'base'], \
             f"backbone_size must be 'tiny', 'small', or 'base', got '{backbone_size}'"
+        assert backbone in self.BACKBONE_CONFIGS, \
+            f"backbone must be one of {list(self.BACKBONE_CONFIGS.keys())}, got '{backbone}'"
         assert down_ratio in [1, 2, 4, 8, 16], \
             f"down_ratio must be 1, 2, 4, 8, or 16, got '{down_ratio}'"
 
         self.backbone_size = backbone_size
+        self.backbone_name = backbone
         self.num_classes = num_classes
         self.img_size = img_size
         self.use_gabor = use_gabor
@@ -550,20 +574,13 @@ class CamouflageHerdNetConvNeXt(nn.Module):
 
         if debug:
             logger.info(f"\nInitializing CamouflageHerdNetConvNeXt:")
-            logger.info(f"  Backbone: ConvNeXt-{backbone_size.capitalize()}")
+            logger.info(f"  Backbone: {backbone}-{backbone_size.capitalize()}")
             logger.info(f"  Image size: {img_size}×{img_size}")
             logger.info(f"  Gabor textures: {'ON' if use_gabor else 'OFF'}")
             logger.info(f"  Edge enhancement: {'ON' if use_edge_enhancement else 'OFF'}")
             logger.info(f"  Multi-resolution: {'ON' if use_multi_res else 'OFF'}")
 
-        # ConvNeXt backbone configurations
-        convnext_models = {
-            'tiny': ('convnext_tiny.fb_in22k_ft_in1k', [96, 192, 384, 768]),
-            'small': ('convnext_small.fb_in22k_ft_in1k', [96, 192, 384, 768]),
-            'base': ('convnext_base.fb_in22k_ft_in1k', [128, 256, 512, 1024]),
-        }
-
-        model_name, self.feature_channels = convnext_models[backbone_size]
+        model_name, self.feature_channels = self.BACKBONE_CONFIGS[backbone][backbone_size]
 
         # Gabor texture preprocessing (optional)
         if use_gabor:
@@ -572,10 +589,19 @@ class CamouflageHerdNetConvNeXt(nn.Module):
                 out_channels=32,
                 kernel_size=11,
             )
+            # Projection to fuse Gabor features into backbone stage 0
+            # Gabor output is at full resolution, stage 0 is at 1/4 resolution
+            self.gabor_proj = nn.Sequential(
+                nn.Conv2d(32, self.feature_channels[0], kernel_size=1, bias=False),
+                nn.BatchNorm2d(self.feature_channels[0]),
+                nn.GELU(),
+            )
             if debug:
                 logger.info("  Gabor filters: 8 filters (4 orientations × 2 frequencies)")
+                logger.info(f"  Gabor fusion: 32 -> {self.feature_channels[0]} channels into stage 0")
         else:
             self.gabor_extractor = None
+            self.gabor_proj = None
 
         # Create ConvNeXt backbone
         try:
@@ -699,14 +725,20 @@ class CamouflageHerdNetConvNeXt(nn.Module):
         else:
             x_resized = x
 
-        # Apply Gabor if enabled
-        if self.use_gabor and self.gabor_extractor is not None:
-            gabor_features = self.gabor_extractor(x_resized)
-            # Store for potential use (currently not directly used)
-
         # Extract features (make contiguous — ConvNeXt outputs channels-last
         # format which causes .view() failures in backward pass on CPU/MPS)
         features = [f.contiguous() for f in self.backbone(x_resized)]
+
+        # Fuse Gabor texture features into stage 0 (finest backbone scale)
+        if self.use_gabor and self.gabor_extractor is not None:
+            gabor_features = self.gabor_extractor(x_resized)
+            # Gabor is at full res, stage 0 is at 1/4 — downsample to match
+            gabor_projected = self.gabor_proj(gabor_features)
+            gabor_downsampled = F.interpolate(
+                gabor_projected, size=features[0].shape[2:], mode='bilinear', align_corners=False
+            )
+            features[0] = features[0] + gabor_downsampled
+
         return features
 
     def forward(self, x: torch.Tensor, debug: bool = False) -> Tuple[torch.Tensor, torch.Tensor] | Dict:

@@ -1,0 +1,280 @@
+losses:
+  FocalLoss:
+    print_name: focal_loss
+    from_torch: false
+    output_idx: 0
+    target_idx: 0
+    lambda_const: 1.0
+    kwargs:
+      alpha: 2
+      beta: 4
+      reduction: mean
+      normalize: false
+  CrossEntropyLoss:
+    print_name: ce_loss
+    from_torch: true
+    output_idx: 1
+    target_idx: 1
+    lambda_const: 1.0
+    background_class_weight: 0.1
+    kwargs:
+      reduction: mean
+      weight:
+      - ${losses.CrossEntropyLoss.background_class_weight}
+      - 5.0
+datasets:
+  img_size:
+  - 512
+  - 512
+  anno_type: point
+  num_classes: 2
+  collate_fn: null
+  class_def:
+    1: iguana
+  train:
+    name: CSVDataset
+    csv_file: /home/christian/data/training_data/2026_06_03_al_v7_canonical/al_v7_2026_06_03/train/herdnet_format.csv
+    root_dir: /home/christian/data/training_data/2026_06_03_al_v7_canonical/al_v7_2026_06_03/train/Default
+    sampler: null
+    augmentation_multiplier: 10
+    albu_transforms:
+      ObjectAwareRandomCrop:
+        height: 512
+        width: 512
+        min_edge_distance: 0
+        empty_probability: 0.2
+        edge_probability: 0.2
+        edge_zone: 120
+        p: 1.0
+      HorizontalFlip:
+        p: 0.5
+      VerticalFlip:
+        p: 0.5
+      RandomRotate90:
+        p: 0.5
+      ShiftScaleRotate:
+        shift_limit: 0.0625
+        scale_limit: 0.15
+        rotate_limit: 45
+        p: 0.5
+      Perspective:
+        scale: 0.05
+        p: 0.2
+      OneOf:
+        transforms:
+          Downscale:
+            scale_range:
+            - 0.5
+            - 0.9
+            p: 1.0
+          GaussianBlur:
+            blur_limit:
+            - 3
+            - 7
+            p: 1.0
+          Sharpen:
+            alpha:
+            - 0.2
+            - 0.5
+            lightness:
+            - 0.5
+            - 1.0
+            p: 1.0
+        p: 0.3
+      RandomBrightnessContrast:
+        brightness_limit: 0.2
+        contrast_limit: 0.2
+        p: 0.3
+      RandomGamma:
+        gamma_limit:
+        - 80
+        - 120
+        p: 0.2
+      SomeOf:
+        transforms:
+          PlasmaShadow:
+            p: 1.0
+          RandomShadow:
+            num_shadows_limit:
+            - 1
+            - 2
+            shadow_dimension: 5
+            p: 1.0
+        'n': 1
+        p: 0.2
+      HueSaturationValue:
+        hue_shift_limit: 10
+        sat_shift_limit: 20
+        val_shift_limit: 15
+        p: 0.3
+      RGBShift:
+        r_shift_limit: 10
+        g_shift_limit: 10
+        b_shift_limit: 10
+        p: 0.2
+      CLAHE:
+        clip_limit: 4.0
+        p: 0.2
+      SomeOf_noise:
+        transforms:
+          GaussNoise:
+            std_range:
+            - 0.02
+            - 0.06
+            p: 1.0
+          ISONoise:
+            color_shift:
+            - 0.01
+            - 0.03
+            intensity:
+            - 0.1
+            - 0.3
+            p: 1.0
+          ImageCompression:
+            quality_range:
+            - 60
+            - 90
+            p: 1.0
+        'n': 1
+        p: 0.2
+      CoarseDropout:
+        num_holes_range:
+        - 3
+        - 8
+        hole_height_range:
+        - 8
+        - 25
+        hole_width_range:
+        - 8
+        - 25
+        p: 0.15
+      Normalize:
+        p: 1.0
+    end_transforms:
+      MultiTransformsWrapper:
+        FIDT:
+          num_classes: ${datasets.num_classes}
+          down_ratio: ${model.kwargs.down_ratio}
+          radius: 2
+        PointsToMask:
+          radius: 2
+          num_classes: ${datasets.num_classes}
+          squeeze: true
+          down_ratio: 32
+  validate:
+    name: CSVDataset
+    csv_file: /home/christian/data/training_data/2026_06_03_al_v7_canonical/al_v7_2026_06_03/val/herdnet_format.csv
+    root_dir: /home/christian/data/training_data/2026_06_03_al_v7_canonical/al_v7_2026_06_03/val/Default
+    albu_transforms:
+      Normalize:
+        p: 1.0
+    end_transforms:
+      DownSample:
+        down_ratio: ${model.kwargs.down_ratio}
+        anno_type: ${datasets.anno_type}
+  test:
+    name: CSVDataset
+    csv_file: /home/christian/data/training_data/2026_06_03_al_v7_canonical/al_v7_2026_06_03/val/herdnet_format.csv
+    root_dir: /home/christian/data/training_data/2026_06_03_al_v7_canonical/al_v7_2026_06_03/val/Default
+    albu_transforms:
+      Normalize:
+        p: 1.0
+    end_transforms:
+      DownSample:
+        down_ratio: ${model.kwargs.down_ratio}
+        anno_type: ${datasets.anno_type}
+training_settings:
+  trainer: Trainer
+  epochs: 10
+  valid_freq: 1
+  print_freq: 20
+  batch_size: 4
+  optimizer: adamW
+  lr: 8.0e-05
+  backbone_lr: 1.0e-05
+  head_lr: 0.001
+  weight_decay: 0.00016
+  num_workers: 8
+  auto_lr:
+    mode: max
+    patience: 8
+    threshold: 0.0001
+    threshold_mode: rel
+    cooldown: 5
+    min_lr: 1.0e-08
+    verbose: true
+  warmup_iters: 500
+  early_stopping: false
+  early_stopping_patience: 20
+  early_stopping_min_delta: 0.0
+  early_stopping_restore_best_weights: true
+  vizual_fn: visualize_sample
+  visualiser:
+    name: HeatMapVisualizer
+    output_dir: ./visualizations
+    down_ratio: 4
+  evaluator:
+    name: HerdNetEvaluator
+    threshold: 100
+    select_mode: max
+    validate_on: f2_score
+    kwargs:
+      print_freq: 100
+      lmds_kwargs:
+        kernel_size:
+        - 9
+        - 9
+        adapt_ts: 0.2
+        scale_factor: 1
+        up: true
+        score_threshold: 0.3
+  stitcher:
+    name: HerdNetStitcher
+    kwargs:
+      overlap: 120
+      down_ratio: ${model.kwargs.down_ratio}
+      up: false
+      reduction: mean
+  debug_visualiser: null
+model:
+  name: CamouflageHerdNetConvNeXtV2
+  from_torchvision: false
+  load_from: /home/christian/hnee/HerdNet/best_models/phase8/b4_seed42/best_model.pth
+  resume_from: null
+  kwargs:
+    pretrained: true
+    down_ratio: 4
+    backbone_size: tiny
+  freeze: null
+wandb_flag: true
+seed: 42
+device_name: null
+wandb_project: hn_active_learning
+wandb_entity: karisu
+wandb_run: al_v7_b4_seed42_balanced
+wandb_tags:
+- active_learning
+- v7
+- b4
+- balanced
+- f2_score
+- emp20
+- post_iterv2_merge
+- espanola_floreana_val
+wandb_notes: 'al_v7 — post iter-v2 merge.
+
+  Master: 17151 imgs, 75755 iguana_point, 20692 boxes (unchanged).
+
+  Val: 610 net-new Espanola/Floreana from iter-v2 (never reviewed).
+
+  validate_on=f2_score: keeps recall focus but won''t pick epochs with
+  collapsing precision. score_threshold=0.30 + adapt_ts=0.20 at eval
+  for cleaner CVAT review next round.
+
+  Warm-start from best_models/phase8/b4_seed42/best_model.pth.
+
+  '
+
+hydra:
+  run:
+    dir: ./output/al_v7_b4_seed42/${now:%Y-%m-%d}/${now:%H-%M-%S}

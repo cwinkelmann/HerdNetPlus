@@ -13,7 +13,7 @@ from omegaconf import DictConfig, OmegaConf
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 # Paths for testing
-TEST_MODEL_PATH =  PROJECT_ROOT / "best_models/17-02-44_convnext_camouflaged_zr7ljum7/best_model.pth"
+TEST_MODEL_PATH =  PROJECT_ROOT / "best_models/fmo03_new_full_convnext/best_model.pth"
 TEST_DATA_DIR = PROJECT_ROOT / Path("tests/data/single_images/ISWF01_22012023_subset")
 
 
@@ -158,7 +158,7 @@ def inference_config() -> DictConfig:
             "kwargs": {
                 "pretrained": True,
                 "down_ratio": 4,
-                "backbone_size": "base",
+                "backbone_size": "tiny",
             },
             "freeze": None,
         },
